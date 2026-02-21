@@ -1,8 +1,12 @@
 const state = {
   mode: "day",
+  groupBy: "app",
   anchorDate: null,
   startDate: null,
   endDate: null,
+  paused: false,
+  categoryMap: {},
+  lastOverview: null,
 };
 
 const CHART_COLORS = [
@@ -14,6 +18,22 @@ const CHART_COLORS = [
   "#7c3aed",
   "#0ea5e9",
   "#15803d",
+  "#f59e0b",
+  "#14b8a6",
+];
+
+const CATEGORY_OPTIONS = [
+  "Sin categoría",
+  "Trabajo",
+  "Desarrollo",
+  "Comunicación",
+  "Música",
+  "Navegación",
+  "Documentación",
+  "Productividad",
+  "Entretenimiento",
+  "Sistema",
+  "Inactividad",
 ];
 
 function qs(id) {
@@ -73,6 +93,15 @@ function formatDayLabel(dayIso) {
   return parseIsoDateUtc(dayIso).toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
 }
 
+async function fetchJson(url, options = undefined) {
+  const res = await fetch(url, options);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`HTTP ${res.status}: ${body || "error"}`);
+  }
+  return res.json();
+}
+
 function setStatus(ok, text) {
   const pill = qs("status-pill");
   pill.textContent = text;
@@ -84,21 +113,27 @@ function setModeUi(mode) {
   custom.classList.toggle("hidden", mode !== "custom");
 }
 
-function buildOverviewUrl() {
+function buildOverviewUrl(params = {}) {
+  const mode = params.mode || state.mode;
+  const groupBy = params.groupBy || state.groupBy;
   const url = new URL("/api/overview", window.location.origin);
-  url.searchParams.set("mode", state.mode);
+  url.searchParams.set("mode", mode);
+  url.searchParams.set("group_by", groupBy);
 
-  if (state.mode === "custom") {
-    if (!state.startDate || !state.endDate) {
+  if (mode === "custom") {
+    const startDate = params.startDate || state.startDate;
+    const endDate = params.endDate || state.endDate;
+    if (!startDate || !endDate) {
       throw new Error("Selecciona inicio y fin para el rango personalizado");
     }
-    url.searchParams.set("start_date", state.startDate);
-    url.searchParams.set("end_date", state.endDate);
+    url.searchParams.set("start_date", startDate);
+    url.searchParams.set("end_date", endDate);
     return url;
   }
 
-  if (state.anchorDate) {
-    url.searchParams.set("anchor_date", state.anchorDate);
+  const anchorDate = params.anchorDate || state.anchorDate;
+  if (anchorDate) {
+    url.searchParams.set("anchor_date", anchorDate);
   }
   return url;
 }
@@ -121,35 +156,48 @@ function formatPeriodSummary(data) {
 }
 
 function setOverviewMetrics(data) {
-  qs("total-active").textContent = data.total_human;
-  qs("distinct-apps").textContent = String(data.distinct_apps);
+  const activeSeconds = Number(data.active_seconds ?? data.total_seconds ?? 0);
+  const activeHuman = data.active_human || data.total_human || "0s";
+  const afkHuman = data.afk_human || "0s";
+
+  qs("total-active").textContent = activeHuman;
+  qs("afk-active").textContent = afkHuman;
+  qs("distinct-apps").textContent = String(data.distinct_apps || 0);
   qs("unknown-active").textContent = data.unattributed_human || "0s";
 
   const daysCount = Math.max(1, Number(data.days_count) || 1);
-  const totalSeconds = Math.max(0, Number(data.total_seconds) || 0);
-  const dailyAverage = Math.round(totalSeconds / daysCount);
+  const dailyAverage = Math.round(activeSeconds / daysCount);
   qs("daily-average").textContent = formatDuration(dailyAverage);
 
   qs("period-summary").textContent = formatPeriodSummary(data);
-  qs("donut-total").textContent = data.total_human || "0s";
+  qs("donut-total").textContent = activeHuman;
+
+  const groupedByCategory = (data.group_by || "app") === "category";
+  qs("grouping-summary").textContent = groupedByCategory
+    ? "Agrupado por categoría."
+    : "Agrupado por aplicación.";
+
+  qs("ranking-subtitle").textContent = groupedByCategory
+    ? "Detalle completo por categoría del período."
+    : "Detalle completo por aplicación del período.";
 }
 
-function renderDonut(topApps, totalSeconds) {
+function renderDonut(topItems) {
   const donut = qs("apps-donut");
   const legend = qs("apps-legend");
 
-  if (!Array.isArray(topApps) || !topApps.length || totalSeconds <= 0) {
+  if (!Array.isArray(topItems) || !topItems.length) {
     donut.style.background = "conic-gradient(#d5dfdc 0% 100%)";
     legend.innerHTML = '<p class="empty">Sin actividad para mostrar distribución.</p>';
     return;
   }
 
-  const selected = topApps.slice(0, 6).map((item) => ({
+  const selected = topItems.slice(0, 7).map((item) => ({
     app: item.app,
     seconds: Number(item.seconds) || 0,
   }));
 
-  const restSeconds = topApps.slice(6).reduce((acc, item) => acc + (Number(item.seconds) || 0), 0);
+  const restSeconds = topItems.slice(7).reduce((acc, item) => acc + (Number(item.seconds) || 0), 0);
   if (restSeconds > 0) {
     selected.push({ app: "Otros", seconds: restSeconds });
   }
@@ -193,15 +241,15 @@ function renderDonut(topApps, totalSeconds) {
     .join("");
 }
 
-function renderRanking(topApps) {
+function renderRanking(topItems) {
   const body = qs("ranking-body");
-  if (!topApps?.length) {
+  if (!topItems?.length) {
     body.innerHTML = '<tr><td colspan="4" class="empty">Sin datos para este período.</td></tr>';
     return;
   }
 
-  body.innerHTML = topApps
-    .slice(0, 25)
+  body.innerHTML = topItems
+    .slice(0, 30)
     .map(
       (item, idx) => `
       <tr>
@@ -321,9 +369,33 @@ function renderTrendChart(labels, values) {
   `;
 }
 
+function renderMiniSeries(containerId, labels, values) {
+  const root = qs(containerId);
+  if (!Array.isArray(values) || values.length === 0) {
+    root.innerHTML = '<p class="empty">Sin datos.</p>';
+    return;
+  }
+
+  const peak = Math.max(...values, 1);
+  root.innerHTML = "";
+
+  for (let i = 0; i < values.length; i += 1) {
+    const value = values[i] || 0;
+    const pct = Math.round((value / peak) * 100);
+    const row = document.createElement("div");
+    row.className = "hour-row";
+    row.innerHTML = `
+      <span class="hour-label">${labels[i]}</span>
+      <div class="bar"><span style="width: ${pct}%;"></span></div>
+      <span class="hour-value">${formatDuration(value)}</span>
+    `;
+    root.appendChild(row);
+  }
+}
+
 function getAverageSeconds(data) {
   const daysCount = Math.max(1, Number(data.days_count) || 1);
-  const total = Math.max(0, Number(data.total_seconds) || 0);
+  const total = Math.max(0, Number(data.active_seconds ?? data.total_seconds) || 0);
   return Math.round(total / daysCount);
 }
 
@@ -363,11 +435,13 @@ function clearComparison(reason) {
   qs("cmp-avg-current").textContent = "--";
   qs("cmp-apps-current").textContent = "--";
   qs("cmp-unknown-current").textContent = "--";
+  qs("cmp-afk-current").textContent = "--";
 
   setDeltaElement("cmp-total-delta", 0, "--");
   setDeltaElement("cmp-avg-delta", 0, "--");
   setDeltaElement("cmp-apps-delta", 0, "--");
   setDeltaElement("cmp-unknown-delta", 0, "--", true);
+  setDeltaElement("cmp-afk-delta", 0, "--", true);
 }
 
 function buildPreviousRange(current) {
@@ -387,46 +461,42 @@ async function loadCustomOverview(startDate, endDate) {
   url.searchParams.set("mode", "custom");
   url.searchParams.set("start_date", startDate);
   url.searchParams.set("end_date", endDate);
-
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-    throw new Error("No se pudo consultar período comparativo");
-  }
-  return res.json();
+  url.searchParams.set("group_by", state.groupBy);
+  return fetchJson(url.toString());
 }
 
 function renderComparison(current, previous, previousRange) {
   qs("compare-reference").textContent = `Referencia: ${formatShortDate(previousRange.start)} - ${formatShortDate(previousRange.end)}`;
 
-  const currentTotal = Number(current.total_seconds) || 0;
+  const currentTotal = Number(current.active_seconds ?? current.total_seconds) || 0;
   const currentAvg = getAverageSeconds(current);
   const currentApps = Number(current.distinct_apps) || 0;
   const currentUnknown = Number(current.unattributed_seconds) || 0;
+  const currentAfk = Number(current.afk_seconds) || 0;
 
-  const prevTotal = Number(previous.total_seconds) || 0;
+  const prevTotal = Number(previous.active_seconds ?? previous.total_seconds) || 0;
   const prevAvg = getAverageSeconds(previous);
   const prevApps = Number(previous.distinct_apps) || 0;
   const prevUnknown = Number(previous.unattributed_seconds) || 0;
+  const prevAfk = Number(previous.afk_seconds) || 0;
 
   qs("cmp-total-current").textContent = formatDuration(currentTotal);
   qs("cmp-avg-current").textContent = formatDuration(currentAvg);
   qs("cmp-apps-current").textContent = String(currentApps);
   qs("cmp-unknown-current").textContent = formatDuration(currentUnknown);
+  qs("cmp-afk-current").textContent = formatDuration(currentAfk);
 
   const totalDiff = currentTotal - prevTotal;
   const avgDiff = currentAvg - prevAvg;
   const appsDiff = currentApps - prevApps;
   const unknownDiff = currentUnknown - prevUnknown;
+  const afkDiff = currentAfk - prevAfk;
 
   setDeltaElement("cmp-total-delta", totalDiff, formatDelta(totalDiff, prevTotal, (n) => formatDuration(n)));
   setDeltaElement("cmp-avg-delta", avgDiff, formatDelta(avgDiff, prevAvg, (n) => formatDuration(n)));
   setDeltaElement("cmp-apps-delta", appsDiff, formatDelta(appsDiff, prevApps, (n) => String(n)));
-  setDeltaElement(
-    "cmp-unknown-delta",
-    unknownDiff,
-    formatDelta(unknownDiff, prevUnknown, (n) => formatDuration(n)),
-    true
-  );
+  setDeltaElement("cmp-unknown-delta", unknownDiff, formatDelta(unknownDiff, prevUnknown, (n) => formatDuration(n)), true);
+  setDeltaElement("cmp-afk-delta", afkDiff, formatDelta(afkDiff, prevAfk, (n) => formatDuration(n)), true);
 }
 
 function renderRecent(items) {
@@ -477,18 +547,125 @@ function renderOpenApps(data) {
   }
 }
 
-async function loadHealth() {
-  const res = await fetch("/api/health");
-  if (!res.ok) {
-    throw new Error("No se pudo consultar /api/health");
+async function loadCategories() {
+  const data = await fetchJson("/api/categories");
+  const mapping = {};
+  for (const item of data.items || []) {
+    mapping[item.app] = item.category;
   }
-  const data = await res.json();
+  state.categoryMap = mapping;
+  return mapping;
+}
 
-  if (data.tracker?.running) {
-    setStatus(true, "Tracker activo");
-  } else {
-    setStatus(false, "Tracker detenido");
+function appCategoryCandidates(byApp) {
+  const ignored = new Set(["Inactivo", "Proceso", "Desconocido"]);
+  return (byApp || [])
+    .map((row) => row.app)
+    .filter((name) => name && !ignored.has(name))
+    .slice(0, 20);
+}
+
+function buildCategoryOptions(current) {
+  const set = new Set(CATEGORY_OPTIONS);
+  if (current) set.add(current);
+  return Array.from(set.values());
+}
+
+function renderCategoryEditor(byApp, mapping) {
+  const body = qs("category-editor-body");
+  const apps = appCategoryCandidates(byApp);
+  if (!apps.length) {
+    body.innerHTML = '<tr><td colspan="2" class="empty">Sin aplicaciones para categorizar.</td></tr>';
+    return;
   }
+
+  body.innerHTML = apps
+    .map((appName) => {
+      const current = mapping[appName] || "Sin categoría";
+      const options = buildCategoryOptions(current)
+        .map((opt) => `<option value="${opt}" ${opt === current ? "selected" : ""}>${opt}</option>`)
+        .join("");
+      return `
+        <tr>
+          <td>${appName}</td>
+          <td>
+            <select class="category-select" data-app="${appName}">
+              ${options}
+            </select>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+async function saveCategories() {
+  const status = qs("category-save-status");
+  const selects = Array.from(document.querySelectorAll(".category-select"));
+  if (!selects.length) {
+    status.textContent = "No hay categorías para guardar.";
+    return;
+  }
+
+  status.textContent = "Guardando...";
+  let changed = 0;
+
+  for (const sel of selects) {
+    const appName = sel.getAttribute("data-app") || "";
+    const newCategory = sel.value || "Sin categoría";
+    const current = state.categoryMap[appName] || "Sin categoría";
+    if (newCategory === current) {
+      continue;
+    }
+
+    await fetchJson(`/api/categories/${encodeURIComponent(appName)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ category: newCategory }),
+    });
+    state.categoryMap[appName] = newCategory;
+    changed += 1;
+  }
+
+  status.textContent = changed > 0 ? `Guardado (${changed} cambios).` : "Sin cambios.";
+
+  if (changed > 0) {
+    await refreshAll();
+  }
+}
+
+async function loadRolling30() {
+  const end = todayIso();
+  const start = addDaysIso(end, -29);
+  const data = await loadCustomOverview(start, end);
+
+  const byDay = Array.isArray(data.by_day) ? data.by_day : [];
+  const labels = byDay.map((row) => formatDayLabel(row.date));
+  const values = byDay.map((row) => Number(row.seconds || 0));
+
+  qs("rolling30-summary").textContent = `Del ${formatShortDate(start)} al ${formatShortDate(end)} · Activo ${
+    data.active_human || data.total_human
+  } · AFK ${data.afk_human || "0s"}`;
+
+  renderMiniSeries("rolling30-chart", labels, values);
+}
+
+async function loadHealth() {
+  const data = await fetchJson("/api/health");
+
+  const running = Boolean(data.tracker?.running);
+  const paused = Boolean(data.tracker?.paused);
+  state.paused = paused;
+
+  if (!running) {
+    setStatus(false, "Tracker detenido");
+  } else if (paused) {
+    setStatus(true, "Pausado");
+  } else {
+    setStatus(true, "Tracker activo");
+  }
+
+  qs("pause-btn").textContent = paused ? "Reanudar" : "Pausar";
 
   if (Array.isArray(data.notes) && data.notes.length > 0) {
     qs("updated-at").textContent = data.notes[0];
@@ -496,15 +673,11 @@ async function loadHealth() {
 }
 
 async function loadOverview() {
-  const url = buildOverviewUrl();
-  const res = await fetch(url.toString());
-  if (!res.ok) {
-    throw new Error("No se pudo consultar /api/overview");
-  }
+  const data = await fetchJson(buildOverviewUrl().toString());
+  state.lastOverview = data;
 
-  const data = await res.json();
   setOverviewMetrics(data);
-  renderDonut(data.top_apps || [], Number(data.total_seconds) || 0);
+  renderDonut(data.top_apps || []);
   renderRanking(data.top_apps || []);
 
   const period = renderPeriodChart(data);
@@ -522,6 +695,9 @@ async function loadOverview() {
     }
   }
 
+  const categories = await loadCategories();
+  renderCategoryEditor(data.by_app || [], categories);
+
   if (data.updated_at_ts) {
     const stamp = new Date(data.updated_at_ts * 1000).toLocaleTimeString("es-ES", { hour12: false });
     qs("updated-at").textContent = `Actualizado ${stamp}`;
@@ -529,27 +705,25 @@ async function loadOverview() {
 }
 
 async function loadRecent() {
-  const res = await fetch("/api/recent?limit=30");
-  if (!res.ok) {
-    throw new Error("No se pudo consultar /api/recent");
-  }
-  const data = await res.json();
+  const data = await fetchJson("/api/recent?limit=30");
   renderRecent(data.items || []);
 }
 
 async function loadWindows() {
-  const res = await fetch("/api/windows?limit=400");
-  if (!res.ok) {
-    throw new Error("No se pudo consultar /api/windows");
-  }
-  const data = await res.json();
+  const data = await fetchJson("/api/windows?limit=400");
   renderOpenApps(data);
+}
+
+async function togglePause() {
+  const path = state.paused ? "/api/control/resume" : "/api/control/pause";
+  await fetchJson(path, { method: "POST" });
+  await refreshAll();
 }
 
 async function refreshAll() {
   try {
     await loadHealth();
-    await Promise.all([loadOverview(), loadRecent(), loadWindows()]);
+    await Promise.all([loadOverview(), loadRecent(), loadWindows(), loadRolling30()]);
   } catch (err) {
     setStatus(false, "Error de conexión");
     qs("updated-at").textContent = String(err.message || err);
@@ -558,17 +732,20 @@ async function refreshAll() {
 
 function init() {
   const modeSelect = qs("range-mode");
+  const groupSelect = qs("group-by");
   const anchorInput = qs("anchor-date");
   const startInput = qs("start-date");
   const endInput = qs("end-date");
 
   const today = todayIso();
   state.mode = "day";
+  state.groupBy = "app";
   state.anchorDate = today;
   state.startDate = today;
   state.endDate = today;
 
   modeSelect.value = state.mode;
+  groupSelect.value = state.groupBy;
   anchorInput.value = today;
   startInput.value = today;
   endInput.value = today;
@@ -577,6 +754,10 @@ function init() {
   modeSelect.addEventListener("change", () => {
     state.mode = modeSelect.value;
     setModeUi(state.mode);
+  });
+
+  groupSelect.addEventListener("change", () => {
+    state.groupBy = groupSelect.value;
   });
 
   anchorInput.addEventListener("change", () => {
@@ -593,6 +774,18 @@ function init() {
 
   qs("refresh-btn").addEventListener("click", () => {
     refreshAll();
+  });
+
+  qs("pause-btn").addEventListener("click", () => {
+    togglePause().catch((err) => {
+      qs("updated-at").textContent = String(err.message || err);
+    });
+  });
+
+  qs("save-categories-btn").addEventListener("click", () => {
+    saveCategories().catch((err) => {
+      qs("category-save-status").textContent = `Error: ${String(err.message || err)}`;
+    });
   });
 
   refreshAll();

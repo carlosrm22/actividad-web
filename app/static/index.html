@@ -35,23 +35,37 @@
           <option value="month">Mes</option>
           <option value="custom">Rango</option>
         </select>
+
+        <label for="group-by">Agrupar</label>
+        <select id="group-by">
+          <option value="app">Aplicación</option>
+          <option value="category">Categoría</option>
+        </select>
+
         <label for="anchor-date">Fecha base</label>
         <input id="anchor-date" type="date" />
+
         <div id="custom-range" class="custom-range hidden">
           <label for="start-date">Inicio</label>
           <input id="start-date" type="date" />
           <label for="end-date">Fin</label>
           <input id="end-date" type="date" />
         </div>
+
         <button id="refresh-btn" type="button">Actualizar</button>
+        <button id="pause-btn" type="button" class="secondary-btn">Pausar</button>
       </section>
 
       <p id="period-summary" class="period-summary">Período: --</p>
 
-      <section class="metrics">
+      <section class="metrics metrics-5">
         <article class="card metric-card">
           <span>Tiempo activo</span>
           <strong id="total-active">--</strong>
+        </article>
+        <article class="card metric-card">
+          <span>Inactividad (AFK)</span>
+          <strong id="afk-active">--</strong>
         </article>
         <article class="card metric-card">
           <span>Apps distintas</span>
@@ -70,7 +84,7 @@
       <section class="card panel compare-panel">
         <h2>Comparado con período anterior</h2>
         <p id="compare-reference" class="subtitle">Referencia: --</p>
-        <div class="compare-grid">
+        <div class="compare-grid compare-grid-5">
           <article class="compare-item">
             <span>Tiempo activo</span>
             <strong id="cmp-total-current">--</strong>
@@ -91,12 +105,18 @@
             <strong id="cmp-unknown-current">--</strong>
             <small id="cmp-unknown-delta" class="delta neutral">--</small>
           </article>
+          <article class="compare-item">
+            <span>Inactividad (AFK)</span>
+            <strong id="cmp-afk-current">--</strong>
+            <small id="cmp-afk-delta" class="delta neutral">--</small>
+          </article>
         </div>
       </section>
 
       <section class="grid-2">
         <article class="card panel">
-          <h2>Distribución por app</h2>
+          <h2>Distribución del período</h2>
+          <p id="grouping-summary" class="subtitle">Agrupado por aplicación.</p>
           <div class="donut-layout">
             <div id="apps-donut" class="donut-chart">
               <div class="donut-center">
@@ -116,15 +136,45 @@
         </article>
       </section>
 
+      <section class="grid-2">
+        <article class="card panel">
+          <h2>Categorías de aplicaciones</h2>
+          <p class="subtitle">Asigna categorías para analizar productividad por contexto.</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Aplicación</th>
+                  <th>Categoría</th>
+                </tr>
+              </thead>
+              <tbody id="category-editor-body">
+                <tr><td colspan="2" class="empty">Cargando...</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="category-actions">
+            <button id="save-categories-btn" type="button">Guardar categorías</button>
+            <span id="category-save-status" class="subtitle"></span>
+          </div>
+        </article>
+
+        <article class="card panel">
+          <h2>Últimos 30 días</h2>
+          <p id="rolling30-summary" class="subtitle">Cargando...</p>
+          <div id="rolling30-chart" class="hourly-chart"></div>
+        </article>
+      </section>
+
       <section class="card panel">
         <h2>Ranking del período</h2>
-        <p class="subtitle">Detalle completo por tiempo y porcentaje.</p>
+        <p id="ranking-subtitle" class="subtitle">Detalle completo por tiempo y porcentaje.</p>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>#</th>
-                <th>Aplicación</th>
+                <th>Elemento</th>
                 <th>Tiempo</th>
                 <th>%</th>
               </tr>

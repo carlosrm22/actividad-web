@@ -1,17 +1,21 @@
 # Actividad Web (tipo ActivityWatch)
 
-App local para Linux que monitorea tu ventana activa y muestra estadísticas en una interfaz web en español.
+App local para Linux que monitorea ventana activa, inactividad (AFK) y estadísticas de uso en interfaz web en español.
 
 ## Qué hace
 
 - Registra sesiones de uso por aplicación/ventana.
-- Guarda los datos en SQLite (`data/actividad.db`).
-- Expone API local para métricas.
-- Muestra dashboard web con:
+- Detecta inactividad y la guarda como `Inactivo`.
+- Guarda datos en SQLite (`data/actividad.db`).
+- Permite pausar/reanudar tracking.
+- Permite categorizar aplicaciones para análisis por contexto.
+- Dashboard web con:
   - tiempo activo,
-  - apps principales,
-  - actividad por hora,
-  - sesiones recientes.
+  - tiempo AFK,
+  - ranking por app o categoría,
+  - comparativa con período anterior,
+  - tendencia del período,
+  - resumen de últimos 30 días.
 
 ## Requisitos
 
@@ -24,6 +28,8 @@ App local para Linux que monitorea tu ventana activa y muestra estadísticas en 
   - `kdotool`
 - Opcional en Hyprland/Wayland:
   - `hyprctl`
+- Para detección AFK en X11/XWayland:
+  - `xprintidle`
 
 ## Instalación rápida
 
@@ -42,7 +48,7 @@ source .venv/bin/activate
 uvicorn app.main:app --host 127.0.0.1 --port 18765
 ```
 
-Abre en navegador:
+Abrir en navegador:
 
 - http://127.0.0.1:18765
 
@@ -51,38 +57,52 @@ Abre en navegador:
 - `ACTIVIDAD_DB_PATH` (default: `data/actividad.db`)
 - `ACTIVIDAD_INTERVAL_SECONDS` (default: `2`)
 - `ACTIVIDAD_ENABLE_KWIN_DBUS` (default: `0`, en KDE Wayland)
+- `ACTIVIDAD_IDLE_ENABLED` (default: `1`)
+- `ACTIVIDAD_IDLE_THRESHOLD_SECONDS` (default: `60`)
 
 Ejemplo:
 
 ```bash
-ACTIVIDAD_INTERVAL_SECONDS=1 uvicorn app.main:app --host 127.0.0.1 --port 18765
+ACTIVIDAD_INTERVAL_SECONDS=1 \
+ACTIVIDAD_IDLE_THRESHOLD_SECONDS=90 \
+uvicorn app.main:app --host 127.0.0.1 --port 18765
 ```
 
-## Autostart (systemd --user)
+## API principal
 
-El proyecto incluye `run.sh` para usarlo con un servicio de usuario.
+- `GET /api/health`
+- `GET /api/overview` (`mode`, `group_by`, fechas)
+- `GET /api/ranking`
+- `GET /api/recent`
+- `GET /api/windows`
+- `GET /api/categories`
+- `PUT /api/categories/{app}`
+- `DELETE /api/categories/{app}`
+- `POST /api/control/pause`
+- `POST /api/control/resume`
+- `POST /api/control/state`
+
+## Autostart (systemd --user)
 
 Archivo recomendado de entorno:
 
 ```bash
 mkdir -p ~/.config/actividad-web
-cat > ~/.config/actividad-web/env <<'EOF'
+cat > ~/.config/actividad-web/env <<'EOF_ENV'
 ACTIVIDAD_PORT=18765
 ACTIVIDAD_ENABLE_KWIN_DBUS=0
 ACTIVIDAD_INTERVAL_SECONDS=2
+ACTIVIDAD_IDLE_ENABLED=1
+ACTIVIDAD_IDLE_THRESHOLD_SECONDS=60
 ACTIVIDAD_DB_PATH=/home/$USER/actividad-web/data/actividad.db
-EOF
+EOF_ENV
 ```
 
 ## Notas de compatibilidad
 
-- En X11, con `xdotool` + `xprop`, la detección es completa y estable.
+- En X11, con `xdotool` + `xprop`, la detección de ventana activa es estable.
 - En Wayland:
-  - Hyprland: soporte nativo con `hyprctl`.
-  - KDE Plasma Wayland: soporte nativo recomendado con `kdotool`.
-  - KDE Plasma Wayland: también puede usar backend DBus (`ACTIVIDAD_ENABLE_KWIN_DBUS=1`), pero puede interferir con el cursor en algunas configuraciones.
-  - Si no está `kdotool`, usa fallback XWayland con `xdotool` + `xprop`.
-  - En fallback XWayland, apps nativas Wayland pueden salir como `Proceso`.
-  - Esta app mide tiempo de ventana activa. Apps corriendo en segundo plano (por ejemplo Deezer minimizado/no enfocado) no suman tiempo activo hasta que les des foco.
-  - Otros compositores: fallback con `xdotool` + `xprop` vía XWayland; ventanas nativas Wayland pueden no detectarse siempre.
-- Si faltan utilidades, revisa `GET /api/health` para ver advertencias.
+  - Hyprland: backend nativo con `hyprctl`.
+  - KDE Plasma Wayland: backend nativo recomendado con `kdotool`.
+  - Fallback XWayland (`xdotool` + `xprop`) puede perder apps nativas Wayland.
+- Si faltan utilidades, revisa `GET /api/health` para advertencias.

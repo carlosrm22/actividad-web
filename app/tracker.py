@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from .db import ActivityDB
 from .detector import ActiveWindow, WindowDetector
+from .idle import IdleDetector
 
 
 @dataclass
@@ -17,15 +18,29 @@ class _CurrentSession:
 
 
 class ActivityTracker:
-    def __init__(self, db: ActivityDB, detector: WindowDetector, interval_seconds: float = 2.0) -> None:
+    def __init__(
+        self,
+        db: ActivityDB,
+        detector: WindowDetector,
+        interval_seconds: float = 2.0,
+        idle_detector: IdleDetector | None = None,
+        idle_enabled: bool = True,
+        idle_threshold_seconds: int = 60,
+    ) -> None:
         self.db = db
         self.detector = detector
         self.interval_seconds = max(0.5, float(interval_seconds))
+        self.idle_detector = idle_detector
+        self.idle_enabled = bool(idle_enabled)
+        self.idle_threshold_seconds = max(1, int(idle_threshold_seconds))
 
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._current: _CurrentSession | None = None
+        self._paused = False
+        self._last_idle_seconds: int | None = None
+        self._last_idle_backend = "none"
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -43,11 +58,18 @@ class ActivityTracker:
         with self._lock:
             self._flush_locked(int(time.time()))
 
+    def set_paused(self, paused: bool) -> None:
+        with self._lock:
+            self._paused = bool(paused)
+            if self._paused:
+                self._flush_locked(int(time.time()))
+
     def status(self) -> dict[str, object]:
         with self._lock:
             current = self._current
             return {
                 "running": bool(self._thread and self._thread.is_alive()),
+                "paused": self._paused,
                 "interval_seconds": self.interval_seconds,
                 "current": {
                     "app": current.app,
@@ -57,17 +79,41 @@ class ActivityTracker:
                 }
                 if current
                 else None,
+                "idle": {
+                    "enabled": self.idle_enabled,
+                    "threshold_seconds": self.idle_threshold_seconds,
+                    "last_idle_seconds": self._last_idle_seconds,
+                    "last_backend": self._last_idle_backend,
+                },
             }
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
             now_ts = int(time.time())
             detected = self.detector.detect()
+            idle_seconds, idle_backend = self._detect_idle()
 
             with self._lock:
-                self._ingest_locked(now_ts, detected)
+                self._last_idle_seconds = idle_seconds
+                self._last_idle_backend = idle_backend
+
+                if self._paused:
+                    self._flush_locked(now_ts)
+                else:
+                    if idle_seconds is not None and idle_seconds >= self.idle_threshold_seconds:
+                        detected = ActiveWindow(app="Inactivo", title="", source="idle")
+                    self._ingest_locked(now_ts, detected)
 
             self._stop_event.wait(self.interval_seconds)
+
+    def _detect_idle(self) -> tuple[int | None, str]:
+        if not self.idle_enabled or self.idle_detector is None:
+            return (None, "disabled")
+
+        idle_seconds = self.idle_detector.get_idle_seconds()
+        caps = self.idle_detector.capabilities()
+        backend = str(caps.get("last_backend") or "none")
+        return (idle_seconds, backend)
 
     def _ingest_locked(self, now_ts: int, detected: ActiveWindow | None) -> None:
         if detected is None:

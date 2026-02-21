@@ -11,9 +11,11 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from .db import ActivityDB, SessionRow
 from .detector import WindowDetector
+from .idle import IdleDetector
 from .tracker import ActivityTracker
 
 
@@ -32,6 +34,25 @@ class RangeSpec:
     start: datetime
     end: datetime
     anchor_date: date_cls
+
+
+class CategoryUpdate(BaseModel):
+    category: str
+
+
+class PauseUpdate(BaseModel):
+    paused: bool
+
+
+def _parse_bool(raw: str | None, default: bool) -> bool:
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _seconds_to_human(total_seconds: int) -> str:
@@ -118,11 +139,51 @@ def _clip_segment(row: SessionRow, range_start: int, range_end: int) -> Segment 
     )
 
 
-def _build_overview(segments: list[Segment], range_start: int, range_end: int, tzinfo) -> dict[str, object]:
+def _is_afk_label(app_label: str) -> bool:
+    return app_label.strip().casefold() in {"inactivo", "idle", "afk"}
+
+
+def _category_for_app(app_label: str, category_map: dict[str, str]) -> str:
+    app = (app_label or "").strip()
+    if _is_afk_label(app):
+        return "Inactividad"
+    if app.casefold() in {"proceso", "desconocido"}:
+        return "No identificado"
+    return category_map.get(app, "Sin categoría")
+
+
+def _sorted_payload(by_key: dict[str, int], total_seconds: int) -> list[dict[str, object]]:
+    rows = sorted(by_key.items(), key=lambda item: item[1], reverse=True)
+    payload: list[dict[str, object]] = []
+    for key, seconds in rows:
+        percentage = (seconds / total_seconds * 100.0) if total_seconds else 0.0
+        payload.append(
+            {
+                "app": key,
+                "seconds": seconds,
+                "human": _seconds_to_human(seconds),
+                "percentage": round(percentage, 1),
+            }
+        )
+    return payload
+
+
+def _build_overview(
+    segments: list[Segment],
+    range_start: int,
+    range_end: int,
+    tzinfo,
+    category_map: dict[str, str],
+    group_by: str,
+) -> dict[str, object]:
+    by_group: dict[str, int] = {}
     by_app: dict[str, int] = {}
+    by_category: dict[str, int] = {}
     by_hour = [0] * 24
     by_day: dict[str, int] = {}
     total_seconds = 0
+    active_seconds = 0
+    afk_seconds = 0
     unattributed_seconds = 0
 
     for segment in segments:
@@ -131,11 +192,23 @@ def _build_overview(segments: list[Segment], range_start: int, range_end: int, t
 
         app_label = (segment.app or "").strip()
         title = (segment.title or "").strip()
+        is_afk = _is_afk_label(app_label)
+        if is_afk:
+            afk_seconds += duration
+        else:
+            active_seconds += duration
+
         is_unattributed = app_label.casefold() in {"proceso", "desconocido"} and not title
         if is_unattributed:
             unattributed_seconds += duration
         else:
             by_app[app_label] = by_app.get(app_label, 0) + duration
+            category_label = _category_for_app(app_label, category_map)
+            by_category[category_label] = by_category.get(category_label, 0) + duration
+            if group_by == "category":
+                by_group[category_label] = by_group.get(category_label, 0) + duration
+            else:
+                by_group[app_label] = by_group.get(app_label, 0) + duration
 
         cur_dt = datetime.fromtimestamp(segment.start_ts, tz=tzinfo)
         end_dt = datetime.fromtimestamp(segment.end_ts, tz=tzinfo)
@@ -149,19 +222,6 @@ def _build_overview(segments: list[Segment], range_start: int, range_end: int, t
             by_day[day_key] = by_day.get(day_key, 0) + chunk_seconds
             cur_dt = chunk_end
 
-    top_apps = sorted(by_app.items(), key=lambda item: item[1], reverse=True)
-    top_app_payload = []
-    for app, seconds in top_apps[:50]:
-        percentage = (seconds / total_seconds * 100.0) if total_seconds else 0.0
-        top_app_payload.append(
-            {
-                "app": app,
-                "seconds": seconds,
-                "human": _seconds_to_human(seconds),
-                "percentage": round(percentage, 1),
-            }
-        )
-
     by_day_payload = [
         {
             "date": day,
@@ -171,15 +231,25 @@ def _build_overview(segments: list[Segment], range_start: int, range_end: int, t
         for day, seconds in sorted(by_day.items())
     ]
 
+    top_payload = _sorted_payload(by_group, total_seconds)[:50]
+
     return {
         "range_start_ts": range_start,
         "range_end_ts": range_end,
+        "group_by": group_by,
         "total_seconds": total_seconds,
         "total_human": _seconds_to_human(total_seconds),
+        "active_seconds": active_seconds,
+        "active_human": _seconds_to_human(active_seconds),
+        "afk_seconds": afk_seconds,
+        "afk_human": _seconds_to_human(afk_seconds),
         "unattributed_seconds": unattributed_seconds,
         "unattributed_human": _seconds_to_human(unattributed_seconds),
         "distinct_apps": len(by_app),
-        "top_apps": top_app_payload,
+        "distinct_categories": len(by_category),
+        "top_apps": top_payload,
+        "by_app": _sorted_payload(by_app, total_seconds),
+        "by_category": _sorted_payload(by_category, total_seconds),
         "by_hour_seconds": by_hour,
         "by_day": by_day_payload,
     }
@@ -189,9 +259,20 @@ def create_app() -> FastAPI:
     db_path = os.getenv("ACTIVIDAD_DB_PATH", "data/actividad.db")
     interval_seconds = float(os.getenv("ACTIVIDAD_INTERVAL_SECONDS", "2"))
 
+    idle_enabled = _parse_bool(os.getenv("ACTIVIDAD_IDLE_ENABLED"), True)
+    idle_threshold_seconds = int(os.getenv("ACTIVIDAD_IDLE_THRESHOLD_SECONDS", "60"))
+
     db = ActivityDB(db_path)
     detector = WindowDetector()
-    tracker = ActivityTracker(db=db, detector=detector, interval_seconds=interval_seconds)
+    idle_detector = IdleDetector(enabled=idle_enabled)
+    tracker = ActivityTracker(
+        db=db,
+        detector=detector,
+        interval_seconds=interval_seconds,
+        idle_detector=idle_detector,
+        idle_enabled=idle_enabled,
+        idle_threshold_seconds=idle_threshold_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -205,12 +286,13 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Actividad Web",
         description="Monitor local de actividad tipo ActivityWatch, en español.",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan,
     )
 
     app.state.db = db
     app.state.detector = detector
+    app.state.idle_detector = idle_detector
     app.state.tracker = tracker
 
     static_dir = Path(__file__).resolve().parent / "static"
@@ -223,6 +305,7 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, object]:
         caps = detector.capabilities()
+        idle_caps = idle_detector.capabilities()
         tracker_status = tracker.status()
 
         notes: list[str] = []
@@ -270,10 +353,29 @@ def create_app() -> FastAPI:
                 "Instala xdotool y xprop para X11."
             )
 
+        idle_health = {
+            "enabled": idle_enabled,
+            "threshold_seconds": idle_threshold_seconds,
+            "available": bool(idle_caps.get("available")),
+            "backends": idle_caps.get("backends", []),
+            "preferred_backend": idle_caps.get("preferred_backend", "none"),
+            "last_backend": tracker_status.get("idle", {}).get("last_backend")
+            or idle_caps.get("last_backend", "none"),
+            "last_idle_seconds": tracker_status.get("idle", {}).get("last_idle_seconds"),
+            "last_checked_ts": idle_caps.get("last_checked_ts"),
+        }
+
+        if idle_enabled and not idle_health["available"]:
+            notes.append(
+                "Detección de inactividad no disponible. Instala xprintidle (X11) "
+                "o habilita DBus de org.freedesktop.ScreenSaver."
+            )
+
         return {
             "ok": True,
             "db_path": db_path,
             "capabilities": caps,
+            "idle": idle_health,
             "tracker": tracker_status,
             "notes": notes,
             "timestamp": int(time.time()),
@@ -286,9 +388,14 @@ def create_app() -> FastAPI:
         start_date: str | None = Query(default=None, description="Solo custom: YYYY-MM-DD"),
         end_date: str | None = Query(default=None, description="Solo custom: YYYY-MM-DD (inclusive)"),
         date: str | None = Query(default=None, description="Compatibilidad legacy (equivale a anchor_date)"),
+        group_by: str = Query(default="app", description="app | category"),
     ) -> dict[str, object]:
         if date and not anchor_date:
             anchor_date = date
+
+        group_by_norm = (group_by or "app").strip().lower()
+        if group_by_norm not in {"app", "category"}:
+            raise HTTPException(status_code=400, detail="group_by debe ser app o category")
 
         spec = _resolve_range(mode=mode, anchor_date_raw=anchor_date, start_date_raw=start_date, end_date_raw=end_date)
         range_start = int(spec.start.timestamp())
@@ -318,7 +425,15 @@ def create_app() -> FastAPI:
             if clipped:
                 segments.append(clipped)
 
-        payload = _build_overview(segments, range_start, range_end, spec.start.tzinfo)
+        category_map = db.get_app_categories()
+        payload = _build_overview(
+            segments,
+            range_start,
+            range_end,
+            spec.start.tzinfo,
+            category_map=category_map,
+            group_by=group_by_norm,
+        )
         payload["mode"] = spec.mode
         payload["date"] = spec.start.date().isoformat()
         payload["anchor_date"] = spec.anchor_date.isoformat()
@@ -336,6 +451,7 @@ def create_app() -> FastAPI:
         start_date: str | None = Query(default=None, description="Solo custom: YYYY-MM-DD"),
         end_date: str | None = Query(default=None, description="Solo custom: YYYY-MM-DD (inclusive)"),
         date: str | None = Query(default=None, description="Compatibilidad legacy (equivale a anchor_date)"),
+        group_by: str = Query(default="app", description="app | category"),
         limit: int = Query(default=20, ge=1, le=100),
     ) -> dict[str, object]:
         base = overview(
@@ -344,12 +460,16 @@ def create_app() -> FastAPI:
             start_date=start_date,
             end_date=end_date,
             date=date,
+            group_by=group_by,
         )
         return {
             "mode": base["mode"],
+            "group_by": base["group_by"],
             "range_start_date": base["range_start_date"],
             "range_end_date_inclusive": base["range_end_date_inclusive"],
             "total_human": base["total_human"],
+            "active_human": base.get("active_human", base["total_human"]),
+            "afk_human": base.get("afk_human", "0s"),
             "unattributed_human": base["unattributed_human"],
             "items": base["top_apps"][:limit],
             "count": min(limit, len(base["top_apps"])),
@@ -421,6 +541,45 @@ def create_app() -> FastAPI:
             if active
             else None,
         }
+
+    @app.get("/api/categories")
+    def categories() -> dict[str, object]:
+        mapping = db.get_app_categories()
+        items = [{"app": app_name, "category": category} for app_name, category in sorted(mapping.items())]
+        return {"count": len(items), "items": items}
+
+    @app.put("/api/categories/{app_name}")
+    def upsert_category(app_name: str, payload: CategoryUpdate) -> dict[str, object]:
+        raw_app = (app_name or "").strip()
+        if not raw_app:
+            raise HTTPException(status_code=400, detail="app_name no puede ser vacío")
+
+        raw_category = (payload.category or "").strip()
+        app_saved, category_saved = db.set_app_category(raw_app, raw_category)
+        return {"ok": True, "app": app_saved, "category": category_saved}
+
+    @app.delete("/api/categories/{app_name}")
+    def remove_category(app_name: str) -> dict[str, object]:
+        raw_app = (app_name or "").strip()
+        if not raw_app:
+            raise HTTPException(status_code=400, detail="app_name no puede ser vacío")
+        removed = db.delete_app_category(raw_app)
+        return {"ok": True, "removed": removed}
+
+    @app.post("/api/control/pause")
+    def pause_tracking() -> dict[str, object]:
+        tracker.set_paused(True)
+        return {"ok": True, "paused": True}
+
+    @app.post("/api/control/resume")
+    def resume_tracking() -> dict[str, object]:
+        tracker.set_paused(False)
+        return {"ok": True, "paused": False}
+
+    @app.post("/api/control/state")
+    def set_control_state(payload: PauseUpdate) -> dict[str, object]:
+        tracker.set_paused(payload.paused)
+        return {"ok": True, "paused": bool(payload.paused)}
 
     return app
 

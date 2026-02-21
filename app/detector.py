@@ -199,7 +199,7 @@ class WindowDetector:
         pid = self._coerce_int(data.get("pid"))
         app = self._resolve_app_name(app=app, pid=pid, title=title)
 
-        return ActiveWindow(app=app, title=title, source="hyprctl")
+        return ActiveWindow(app=app, title=title, source="hyprctl", pid=pid)
 
     def _detect_kdotool(self) -> ActiveWindow | None:
         window_id = self._run(["kdotool", "getactivewindow"])
@@ -357,9 +357,63 @@ class WindowDetector:
         if pid is None:
             return ""
         try:
-            return psutil.Process(pid).name().strip()
+            return (psutil.Process(pid).name() or "").strip()
         except (psutil.Error, ProcessLookupError):
             return ""
+
+    def _process_exe_from_pid(self, pid: int | None) -> str:
+        if pid is None:
+            return ""
+        try:
+            exe = (psutil.Process(pid).exe() or "").strip()
+        except (psutil.Error, ProcessLookupError, PermissionError):
+            return ""
+        if not exe:
+            return ""
+        return os.path.basename(exe)
+
+    def _process_cmdline_from_pid(self, pid: int | None) -> list[str]:
+        if pid is None:
+            return []
+        try:
+            cmdline = psutil.Process(pid).cmdline()
+        except (psutil.Error, ProcessLookupError, PermissionError):
+            return []
+        return [str(part) for part in cmdline if str(part).strip()]
+
+    def _app_from_cmdline(self, cmdline: list[str]) -> str:
+        if not cmdline:
+            return ""
+
+        first = os.path.basename(cmdline[0]).strip()
+        if not first:
+            return ""
+
+        low = first.casefold()
+
+        # Wrappers conocidos: buscamos el script/argumento real.
+        if low in {"python", "python3", "python3.10", "python3.11", "python3.12", "node", "nodejs", "bash", "sh", "zsh"}:
+            for token in cmdline[1:]:
+                token = token.strip()
+                if not token or token.startswith("-"):
+                    continue
+                base = os.path.basename(token)
+                if base.endswith(".py"):
+                    base = base[:-3]
+                if base:
+                    return base
+            return ""
+
+        if low == "flatpak":
+            for token in cmdline[1:]:
+                token = token.strip()
+                if not token or token.startswith("-"):
+                    continue
+                if "." in token:
+                    return token.split(".")[-1]
+                return os.path.basename(token)
+
+        return first
 
     def _app_from_title(self, title: str) -> str:
         title = title.strip()
@@ -374,12 +428,21 @@ class WindowDetector:
 
     def _resolve_app_name(self, app: str, pid: int | None, title: str) -> str:
         app = (app or "").strip()
-        if app:
+        if app and app.casefold() not in {"proceso", "desconocido", "unknown"}:
             return self._humanize_app_name(app)
+
+        cmdline = self._process_cmdline_from_pid(pid)
+        from_cmdline = self._app_from_cmdline(cmdline)
+        if from_cmdline:
+            return self._humanize_app_name(from_cmdline)
 
         proc_name = self._process_name_from_pid(pid)
         if proc_name:
             return self._humanize_app_name(proc_name)
+
+        exe_name = self._process_exe_from_pid(pid)
+        if exe_name:
+            return self._humanize_app_name(exe_name)
 
         from_title = self._app_from_title(title)
         if from_title:
@@ -401,13 +464,29 @@ class WindowDetector:
             "org.telegram.desktop": "Telegram",
             "brave-browser": "Brave",
             "brave": "Brave",
+            "chrome": "Chrome",
+            "google-chrome": "Chrome",
+            "chromium": "Chromium",
+            "chromium-browser": "Chromium",
             "firefox": "Firefox",
+            "firefox-bin": "Firefox",
             "code": "VS Code",
             "code-oss": "VS Code",
+            "cursor": "Cursor",
             "dev.aunetx.deezer": "Deezer",
             "deezer-desktop": "Deezer",
+            "deezer": "Deezer",
+            "spotify": "Spotify",
             "antigravity": "Antigravity",
             "obsidian": "Obsidian",
+            "libreoffice": "LibreOffice",
+            "discord": "Discord",
+            "slack": "Slack",
+            "teams": "Teams",
+            "telegram": "Telegram",
+            "konsole": "Konsole",
+            "kitty": "Kitty",
+            "alacritty": "Alacritty",
         }
         if lower in aliases:
             return aliases[lower]
@@ -421,6 +500,11 @@ class WindowDetector:
         value = re.sub(r"[-_]+", " ", value).strip()
         if not value:
             return "Proceso"
+
+        upper_tokens = {"vscode": "VS Code", "api": "API", "ui": "UI", "db": "DB", "pdf": "PDF"}
+        low_value = value.casefold().replace(" ", "")
+        if low_value in upper_tokens:
+            return upper_tokens[low_value]
 
         if any(ch.isupper() for ch in value):
             return value
