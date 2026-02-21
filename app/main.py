@@ -160,6 +160,8 @@ def create_app() -> FastAPI:
         if session_type == "wayland":
             if preferred_backend == "hyprctl":
                 notes.append("Wayland detectado: usando backend nativo (hyprctl).")
+            elif preferred_backend == "kdotool":
+                notes.append("Wayland detectado: usando backend nativo KDE (kdotool).")
             elif preferred_backend == "kwin_dbus":
                 notes.append("Wayland detectado: usando backend nativo KDE (KWin DBus).")
             elif can_x11:
@@ -260,6 +262,46 @@ def create_app() -> FastAPI:
         return {
             "items": items,
             "count": len(items),
+        }
+
+    @app.get("/api/windows")
+    def windows(limit: int = Query(default=200, ge=1, le=2000)) -> dict[str, object]:
+        active = detector.detect()
+        open_windows = detector.list_windows(limit=limit)
+
+        by_app: dict[str, int] = {}
+        items: list[dict[str, object]] = []
+        for win in open_windows:
+            by_app[win.app] = by_app.get(win.app, 0) + 1
+            items.append(
+                {
+                    "app": win.app,
+                    "title": win.title,
+                    "source": win.source,
+                    "pid": win.pid,
+                    "window_id": win.window_id,
+                }
+            )
+
+        app_counts = [
+            {"app": app_name, "windows": count}
+            for app_name, count in sorted(by_app.items(), key=lambda item: item[1], reverse=True)
+        ]
+
+        return {
+            "count": len(items),
+            "distinct_apps": len(by_app),
+            "app_counts": app_counts,
+            "items": items,
+            "active": {
+                "app": active.app,
+                "title": active.title,
+                "source": active.source,
+                "pid": active.pid,
+                "window_id": active.window_id,
+            }
+            if active
+            else None,
         }
 
     return app

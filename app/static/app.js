@@ -123,6 +123,32 @@ function renderRecent(items) {
     .join("");
 }
 
+function renderOpenApps(data) {
+  const root = qs("open-apps-list");
+  const counts = data?.app_counts || [];
+  const activeApp = data?.active?.app || "";
+
+  if (!counts.length) {
+    root.innerHTML = '<p class="empty">No se pudieron leer ventanas abiertas.</p>';
+    return;
+  }
+
+  root.innerHTML = "";
+  for (const item of counts.slice(0, 20)) {
+    const row = document.createElement("div");
+    row.className = "top-row";
+    const activeBadge = item.app === activeApp ? " (activa)" : "";
+    row.innerHTML = `
+      <header>
+        <strong>${item.app}${activeBadge}</strong>
+        <span>${item.windows} ventana(s)</span>
+      </header>
+      <div class="track"><div class="fill" style="width: ${Math.min(100, item.windows * 12)}%;"></div></div>
+    `;
+    root.appendChild(row);
+  }
+}
+
 async function loadOverview() {
   const url = new URL("/api/overview", window.location.origin);
   if (state.date) {
@@ -156,10 +182,19 @@ async function loadRecent() {
   renderRecent(data.items || []);
 }
 
+async function loadWindows() {
+  const res = await fetch("/api/windows?limit=400");
+  if (!res.ok) {
+    throw new Error("No se pudo consultar /api/windows");
+  }
+  const data = await res.json();
+  renderOpenApps(data);
+}
+
 async function refreshAll() {
   try {
     await loadHealth();
-    await Promise.all([loadOverview(), loadRecent()]);
+    await Promise.all([loadOverview(), loadRecent(), loadWindows()]);
   } catch (err) {
     setStatus(false, "Error de conexión");
     qs("updated-at").textContent = String(err.message || err);

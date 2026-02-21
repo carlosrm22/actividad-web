@@ -17,6 +17,8 @@ class ActiveWindow:
     app: str
     title: str
     source: str
+    pid: int | None = None
+    window_id: str | None = None
 
 
 class WindowDetector:
@@ -24,6 +26,7 @@ class WindowDetector:
 
     def __init__(self) -> None:
         self._has_xdotool = shutil.which("xdotool") is not None
+        self._has_kdotool = shutil.which("kdotool") is not None
         self._has_xprop = shutil.which("xprop") is not None
         self._has_hyprctl = shutil.which("hyprctl") is not None
         self._has_gdbus = shutil.which("gdbus") is not None
@@ -64,14 +67,17 @@ class WindowDetector:
     def capabilities(self) -> dict[str, object]:
         session_type = self._session_type()
         can_x11 = self._has_xdotool and self._has_xprop
+        can_kdotool = self._has_kdotool
         can_kwin = self._enable_kwin_dbus and self._can_use_kwin_dbus()
-        can_wayland = self._has_hyprctl or can_kwin
+        can_wayland = self._has_hyprctl or can_kdotool or can_kwin
         preferred_backend = "none"
         if session_type == "x11":
             preferred_backend = "x11" if can_x11 else "none"
         elif session_type == "wayland":
             if self._has_hyprctl:
                 preferred_backend = "hyprctl"
+            elif can_kdotool:
+                preferred_backend = "kdotool"
             elif can_kwin:
                 preferred_backend = "kwin_dbus"
             elif can_x11:
@@ -79,6 +85,8 @@ class WindowDetector:
         else:
             if self._has_hyprctl:
                 preferred_backend = "hyprctl"
+            elif can_kdotool:
+                preferred_backend = "kdotool"
             elif can_kwin:
                 preferred_backend = "kwin_dbus"
             elif can_x11:
@@ -86,6 +94,7 @@ class WindowDetector:
 
         return {
             "xdotool": self._has_xdotool,
+            "kdotool": self._has_kdotool,
             "xprop": self._has_xprop,
             "hyprctl": self._has_hyprctl,
             "gdbus": self._has_gdbus,
@@ -109,6 +118,14 @@ class WindowDetector:
         # Entorno desconocido: probamos ambas rutas.
         return self._detect_wayland_first() or self._detect_x11_first()
 
+    def list_windows(self, limit: int = 300) -> list[ActiveWindow]:
+        max_items = max(1, min(limit, 2000))
+        if self._has_kdotool:
+            return self._list_kdotool_windows(limit=max_items)
+        if self._has_xdotool and self._has_xprop:
+            return self._list_x11_windows(limit=max_items)
+        return []
+
     def _detect_x11_first(self) -> ActiveWindow | None:
         if self._has_xdotool and self._has_xprop:
             detected = self._detect_x11()
@@ -125,6 +142,10 @@ class WindowDetector:
             detected = self._detect_hyprland()
             if detected is not None:
                 return detected
+        if self._has_kdotool:
+            detected = self._detect_kdotool()
+            if detected is not None:
+                return detected
         if self._enable_kwin_dbus and self._can_use_kwin_dbus():
             detected = self._detect_kwin_dbus()
             if detected is not None:
@@ -138,7 +159,7 @@ class WindowDetector:
 
     def _run(self, args: list[str], timeout: float = 1.5) -> str | None:
         env = None
-        if args and args[0] == "gdbus":
+        if args and args[0] in {"gdbus", "kdotool"}:
             env = os.environ.copy()
             runtime_dir = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
             bus_path = f"{runtime_dir}/bus"
@@ -180,6 +201,17 @@ class WindowDetector:
 
         return ActiveWindow(app=app, title=title, source="hyprctl")
 
+    def _detect_kdotool(self) -> ActiveWindow | None:
+        window_id = self._run(["kdotool", "getactivewindow"])
+        if not window_id:
+            return None
+
+        title = self._run(["kdotool", "getwindowname", window_id]) or ""
+        app = self._run(["kdotool", "getwindowclassname", window_id]) or ""
+        pid = self._coerce_int(self._run(["kdotool", "getwindowpid", window_id]) or "")
+        app = self._resolve_app_name(app=app, pid=pid, title=title)
+        return ActiveWindow(app=app, title=title, source="kdotool", pid=pid, window_id=window_id)
+
     def _detect_kwin_dbus(self) -> ActiveWindow | None:
         raw = self._run(
             [
@@ -207,7 +239,7 @@ class WindowDetector:
         pid = self._extract_variant_map_int(raw, "pid")
         app = self._resolve_app_name(app=app, pid=pid, title=title)
 
-        return ActiveWindow(app=app, title=title, source="kwin_dbus")
+        return ActiveWindow(app=app, title=title, source="kwin_dbus", pid=pid)
 
     def _detect_x11(self) -> ActiveWindow | None:
         window_id = self._run(["xdotool", "getactivewindow"])
@@ -223,7 +255,52 @@ class WindowDetector:
         pid = self._pid_for_window(window_id)
         app = self._resolve_app_name(app=app, pid=pid, title=title)
 
-        return ActiveWindow(app=app, title=title, source="x11")
+        return ActiveWindow(app=app, title=title, source="x11", pid=pid, window_id=window_id)
+
+    def _list_kdotool_windows(self, limit: int) -> list[ActiveWindow]:
+        raw = self._run(["kdotool", "search", ""], timeout=2.0)
+        if not raw:
+            return []
+        ids = [line.strip() for line in raw.splitlines() if line.strip()]
+        unique_ids: list[str] = []
+        seen: set[str] = set()
+        for wid in ids:
+            if wid in seen:
+                continue
+            seen.add(wid)
+            unique_ids.append(wid)
+
+        windows: list[ActiveWindow] = []
+        for wid in unique_ids[:limit]:
+            title = self._run(["kdotool", "getwindowname", wid]) or ""
+            app = self._run(["kdotool", "getwindowclassname", wid]) or ""
+            pid = self._coerce_int(self._run(["kdotool", "getwindowpid", wid]) or "")
+            app = self._resolve_app_name(app=app, pid=pid, title=title)
+            windows.append(ActiveWindow(app=app, title=title, source="kdotool", pid=pid, window_id=wid))
+
+        return windows
+
+    def _list_x11_windows(self, limit: int) -> list[ActiveWindow]:
+        raw = self._run(["xdotool", "search", "--all", "--name", ".*"], timeout=2.0)
+        if not raw:
+            return []
+        ids = [line.strip() for line in raw.splitlines() if line.strip()]
+        windows: list[ActiveWindow] = []
+        seen: set[str] = set()
+        for wid in ids:
+            if wid in seen:
+                continue
+            seen.add(wid)
+            title = self._extract_quoted(self._run(["xprop", "-id", wid, "WM_NAME"]) or "")
+            if not title:
+                title = self._extract_quoted(self._run(["xprop", "-id", wid, "_NET_WM_NAME"]) or "")
+            app = self._extract_last_quoted(self._run(["xprop", "-id", wid, "WM_CLASS"]) or "")
+            pid = self._pid_for_window(wid)
+            app = self._resolve_app_name(app=app, pid=pid, title=title)
+            windows.append(ActiveWindow(app=app, title=title, source="x11", pid=pid, window_id=wid))
+            if len(windows) >= limit:
+                break
+        return windows
 
     def _extract_quoted(self, text: str) -> str:
         # Soporta WM_NAME(STRING) = "Texto"
@@ -290,27 +367,64 @@ class WindowDetector:
             return ""
         for sep in (" — ", " - ", " | ", " • "):
             if sep in title:
-                left = title.split(sep, maxsplit=1)[0].strip()
-                if left:
-                    return left
+                right = title.rsplit(sep, maxsplit=1)[-1].strip()
+                if right:
+                    return right
         return ""
 
     def _resolve_app_name(self, app: str, pid: int | None, title: str) -> str:
         app = (app or "").strip()
         if app:
-            return app
+            return self._humanize_app_name(app)
 
         proc_name = self._process_name_from_pid(pid)
         if proc_name:
-            return proc_name
+            return self._humanize_app_name(proc_name)
 
         from_title = self._app_from_title(title)
         if from_title:
-            return from_title
+            return self._humanize_app_name(from_title)
 
         if pid is not None:
             return f"Proceso-{pid}"
         return "Proceso"
+
+    def _humanize_app_name(self, app: str) -> str:
+        value = (app or "").strip()
+        if not value:
+            return "Proceso"
+
+        lower = value.casefold()
+        aliases = {
+            "org.kde.konsole": "Konsole",
+            "org.kde.dolphin": "Dolphin",
+            "org.telegram.desktop": "Telegram",
+            "brave-browser": "Brave",
+            "brave": "Brave",
+            "firefox": "Firefox",
+            "code": "VS Code",
+            "code-oss": "VS Code",
+            "dev.aunetx.deezer": "Deezer",
+            "deezer-desktop": "Deezer",
+            "antigravity": "Antigravity",
+            "obsidian": "Obsidian",
+        }
+        if lower in aliases:
+            return aliases[lower]
+
+        if "." in value and " " not in value:
+            tail = value.split(".")[-1]
+            if tail:
+                value = tail
+
+        value = value.removesuffix(".desktop")
+        value = re.sub(r"[-_]+", " ", value).strip()
+        if not value:
+            return "Proceso"
+
+        if any(ch.isupper() for ch in value):
+            return value
+        return value.title()
 
     def _coerce_int(self, value: object) -> int | None:
         try:

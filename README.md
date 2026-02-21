@@ -20,6 +20,8 @@ App local para Linux que monitorea tu ventana activa y muestra estadísticas en 
 - Para detección de ventana activa en X11:
   - `xdotool`
   - `xprop` (paquete `xorg-x11-utils` o similar)
+- Para KDE Plasma Wayland (recomendado):
+  - `kdotool`
 - Opcional en Hyprland/Wayland:
   - `hyprctl`
 
@@ -77,7 +79,10 @@ EOF
 - En X11, con `xdotool` + `xprop`, la detección es completa y estable.
 - En Wayland:
   - Hyprland: soporte nativo con `hyprctl`.
-  - KDE Plasma Wayland: por defecto usa fallback XWayland para evitar posibles interferencias del cursor.
-    Puedes activar backend nativo con `ACTIVIDAD_ENABLE_KWIN_DBUS=1`.
+  - KDE Plasma Wayland: soporte nativo recomendado con `kdotool`.
+  - KDE Plasma Wayland: también puede usar backend DBus (`ACTIVIDAD_ENABLE_KWIN_DBUS=1`), pero puede interferir con el cursor en algunas configuraciones.
+  - Si no está `kdotool`, usa fallback XWayland con `xdotool` + `xprop`.
+  - En fallback XWayland, apps nativas Wayland pueden salir como `Proceso`.
+  - Esta app mide tiempo de ventana activa. Apps corriendo en segundo plano (por ejemplo Deezer minimizado/no enfocado) no suman tiempo activo hasta que les des foco.
   - Otros compositores: fallback con `xdotool` + `xprop` vía XWayland; ventanas nativas Wayland pueden no detectarse siempre.
 - Si faltan utilidades, revisa `GET /api/health` para ver advertencias.
