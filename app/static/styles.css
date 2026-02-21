@@ -187,6 +187,13 @@ button:hover {
   background: var(--accent-strong);
 }
 
+.period-summary {
+  margin: -6px 2px 0;
+  color: var(--muted);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+}
+
 .metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -222,6 +229,13 @@ h2 {
   font-size: 1.05rem;
 }
 
+.subchart-title {
+  margin: 14px 0 10px;
+  font-size: 0.9rem;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
 .top-list {
   display: grid;
   gap: 10px;
@@ -248,6 +262,79 @@ h2 {
 .fill {
   height: 100%;
   background: linear-gradient(90deg, #14b8a6, #0e7490);
+}
+
+.donut-layout {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 14px;
+  align-items: center;
+}
+
+.donut-chart {
+  width: 180px;
+  height: 180px;
+  border-radius: 999px;
+  position: relative;
+  margin: 0 auto;
+  background: conic-gradient(#d5dfdc 0% 100%);
+  box-shadow: inset 0 0 0 1px rgba(24, 33, 27, 0.08);
+}
+
+.donut-chart::after {
+  content: "";
+  position: absolute;
+  inset: 24px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 0 1px rgba(24, 33, 27, 0.08);
+}
+
+.donut-center {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  gap: 2px;
+}
+
+.donut-center strong {
+  font-size: 1.12rem;
+}
+
+.donut-center span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.legend-list {
+  display: grid;
+  gap: 8px;
+}
+
+.legend-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.legend-label {
+  font-size: 14px;
+}
+
+.legend-meta {
+  color: var(--muted);
+  font-size: 12px;
+  font-family: "JetBrains Mono", monospace;
 }
 
 .hourly-chart {
@@ -281,6 +368,45 @@ h2 {
   height: 100%;
   width: 0;
   background: linear-gradient(90deg, #3b82f6, #10b981);
+}
+
+.trend-chart {
+  border: 1px solid rgba(24, 33, 27, 0.08);
+  border-radius: 12px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.trend-chart svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.trend-grid line {
+  stroke: rgba(24, 33, 27, 0.1);
+  stroke-dasharray: 3 4;
+}
+
+.trend-area {
+  fill: url(#trend-fill);
+}
+
+.trend-line {
+  fill: none;
+  stroke: #0f766e;
+  stroke-width: 2.6;
+}
+
+.trend-dot {
+  fill: #0f766e;
+}
+
+.trend-x-label {
+  fill: var(--muted);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+  text-anchor: middle;
 }
 
 .table-wrap {
@@ -335,5 +461,14 @@ th {
   .custom-range {
     display: grid;
     gap: 8px;
+  }
+
+  .donut-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .donut-chart {
+    width: 170px;
+    height: 170px;
   }
 }

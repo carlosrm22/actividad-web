@@ -5,6 +5,17 @@ const state = {
   endDate: null,
 };
 
+const CHART_COLORS = [
+  "#0f766e",
+  "#2563eb",
+  "#16a34a",
+  "#d97706",
+  "#dc2626",
+  "#7c3aed",
+  "#0ea5e9",
+  "#15803d",
+];
+
 function qs(id) {
   return document.getElementById(id);
 }
@@ -36,6 +47,11 @@ function formatLocal(ts) {
   });
 }
 
+function formatDayLabel(dayIso) {
+  const d = new Date(`${dayIso}T00:00:00`);
+  return d.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
+}
+
 function setStatus(ok, text) {
   const pill = qs("status-pill");
   pill.textContent = text;
@@ -45,11 +61,6 @@ function setStatus(ok, text) {
 function setModeUi(mode) {
   const custom = qs("custom-range");
   custom.classList.toggle("hidden", mode !== "custom");
-}
-
-function formatDayLabel(dayIso) {
-  const d = new Date(`${dayIso}T00:00:00`);
-  return d.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
 }
 
 function buildOverviewUrl() {
@@ -71,27 +82,103 @@ function buildOverviewUrl() {
   return url;
 }
 
-function renderTopApps(topApps) {
-  const root = qs("top-apps-list");
-  if (!topApps?.length) {
-    root.innerHTML = '<p class="empty">No hay actividad registrada en este período.</p>';
+function formatPeriodSummary(data) {
+  const start = data.range_start_date || data.date;
+  const end = data.range_end_date_inclusive || data.date;
+  if (!start || !end) {
+    return "Período: --";
+  }
+
+  const startText = new Date(`${start}T00:00:00`).toLocaleDateString("es-ES", {
+    day: "2-digit",
+    month: "short",
+  });
+  const endText = new Date(`${end}T00:00:00`).toLocaleDateString("es-ES", {
+    day: "2-digit",
+    month: "short",
+  });
+
+  const map = {
+    day: "Día",
+    week: "Semana",
+    month: "Mes",
+    custom: "Rango",
+  };
+  const modeText = map[data.mode] || "Período";
+  return `${modeText}: ${startText} - ${endText}`;
+}
+
+function setOverviewMetrics(data) {
+  qs("total-active").textContent = data.total_human;
+  qs("distinct-apps").textContent = String(data.distinct_apps);
+  qs("unknown-active").textContent = data.unattributed_human || "0s";
+
+  const daysCount = Math.max(1, Number(data.days_count) || 1);
+  const totalSeconds = Math.max(0, Number(data.total_seconds) || 0);
+  const dailyAverage = Math.round(totalSeconds / daysCount);
+  qs("daily-average").textContent = formatDuration(dailyAverage);
+
+  qs("period-summary").textContent = formatPeriodSummary(data);
+  qs("donut-total").textContent = data.total_human || "0s";
+}
+
+function renderDonut(topApps, totalSeconds) {
+  const donut = qs("apps-donut");
+  const legend = qs("apps-legend");
+
+  if (!Array.isArray(topApps) || !topApps.length || totalSeconds <= 0) {
+    donut.style.background = "conic-gradient(#d5dfdc 0% 100%)";
+    legend.innerHTML = '<p class="empty">Sin actividad para mostrar distribución.</p>';
     return;
   }
 
-  root.innerHTML = "";
-  for (const item of topApps.slice(0, 12)) {
-    const row = document.createElement("div");
-    row.className = "top-row";
-    const pct = Math.max(1, Math.round(item.percentage || 0));
-    row.innerHTML = `
-      <header>
-        <strong>${item.app}</strong>
-        <span>${item.human} (${item.percentage}%)</span>
-      </header>
-      <div class="track"><div class="fill" style="width: ${pct}%;"></div></div>
-    `;
-    root.appendChild(row);
+  const selected = topApps.slice(0, 6).map((item) => ({
+    app: item.app,
+    seconds: Number(item.seconds) || 0,
+  }));
+
+  const restSeconds = topApps.slice(6).reduce((acc, item) => acc + (Number(item.seconds) || 0), 0);
+  if (restSeconds > 0) {
+    selected.push({ app: "Otros", seconds: restSeconds });
   }
+
+  const effectiveTotal = selected.reduce((acc, item) => acc + item.seconds, 0);
+  if (effectiveTotal <= 0) {
+    donut.style.background = "conic-gradient(#d5dfdc 0% 100%)";
+    legend.innerHTML = '<p class="empty">Sin actividad para mostrar distribución.</p>';
+    return;
+  }
+
+  let cursor = 0;
+  const segments = selected.map((item, idx) => {
+    const pct = (item.seconds / effectiveTotal) * 100;
+    const start = cursor;
+    const end = cursor + pct;
+    cursor = end;
+    return {
+      ...item,
+      pct,
+      start,
+      end,
+      color: CHART_COLORS[idx % CHART_COLORS.length],
+    };
+  });
+
+  donut.style.background = `conic-gradient(${segments
+    .map((s) => `${s.color} ${s.start}% ${s.end}%`)
+    .join(", ")})`;
+
+  legend.innerHTML = segments
+    .map(
+      (s) => `
+      <div class="legend-row">
+        <span class="legend-dot" style="background:${s.color};"></span>
+        <span class="legend-label">${s.app}</span>
+        <span class="legend-meta">${formatDuration(s.seconds)} (${s.pct.toFixed(1)}%)</span>
+      </div>
+    `
+    )
+    .join("");
 }
 
 function renderRanking(topApps) {
@@ -136,7 +223,7 @@ function renderPeriodChart(data) {
 
   if (!labels.length || !values.length) {
     root.innerHTML = '<p class="empty">Sin datos para graficar.</p>';
-    return;
+    return { labels: [], values: [] };
   }
 
   const peak = Math.max(...values, 1);
@@ -154,6 +241,72 @@ function renderPeriodChart(data) {
     `;
     root.appendChild(row);
   }
+
+  return { labels, values };
+}
+
+function renderTrendChart(labels, values) {
+  const root = qs("trend-chart");
+  if (!Array.isArray(values) || values.length === 0) {
+    root.innerHTML = '<p class="empty">Sin tendencia para mostrar.</p>';
+    return;
+  }
+
+  const width = 640;
+  const height = 180;
+  const chartLeft = 20;
+  const chartRight = width - 18;
+  const chartTop = 18;
+  const chartBottom = 138;
+  const chartWidth = chartRight - chartLeft;
+  const chartHeight = chartBottom - chartTop;
+  const max = Math.max(...values, 1);
+
+  const points = values.map((value, idx) => {
+    const x = values.length === 1 ? chartLeft + chartWidth / 2 : chartLeft + (idx / (values.length - 1)) * chartWidth;
+    const y = chartBottom - (value / max) * chartHeight;
+    return { x, y };
+  });
+
+  const linePath = points.map((point, idx) => `${idx === 0 ? "M" : "L"}${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
+  const areaPath = `${linePath} L ${points[points.length - 1].x.toFixed(2)} ${chartBottom} L ${points[0].x.toFixed(2)} ${chartBottom} Z`;
+
+  const grid = [0.25, 0.5, 0.75]
+    .map((v) => {
+      const y = chartBottom - v * chartHeight;
+      return `<line x1="${chartLeft}" y1="${y}" x2="${chartRight}" y2="${y}"></line>`;
+    })
+    .join("");
+
+  const dots = points.map((point) => `<circle class="trend-dot" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="2.5"></circle>`).join("");
+
+  const tickIndexes = Array.from(new Set([0, Math.floor((labels.length - 1) / 2), labels.length - 1])).filter(
+    (idx) => idx >= 0 && idx < labels.length
+  );
+
+  const ticks = tickIndexes
+    .map((idx) => {
+      const point = points[idx];
+      const label = labels[idx];
+      return `<text class="trend-x-label" x="${point.x.toFixed(2)}" y="${height - 8}">${label}</text>`;
+    })
+    .join("");
+
+  root.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Tendencia de actividad">
+      <defs>
+        <linearGradient id="trend-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#2dd4bf" stop-opacity="0.35"></stop>
+          <stop offset="100%" stop-color="#2dd4bf" stop-opacity="0.02"></stop>
+        </linearGradient>
+      </defs>
+      <g class="trend-grid">${grid}</g>
+      <path class="trend-area" d="${areaPath}"></path>
+      <path class="trend-line" d="${linePath}"></path>
+      ${dots}
+      ${ticks}
+    </svg>
+  `;
 }
 
 function renderRecent(items) {
@@ -230,14 +383,12 @@ async function loadOverview() {
   }
 
   const data = await res.json();
-  qs("total-active").textContent = data.total_human;
-  qs("distinct-apps").textContent = String(data.distinct_apps);
-  qs("top-app").textContent = data.top_apps?.[0]?.app || "--";
-  qs("unknown-active").textContent = data.unattributed_human || "0s";
-
-  renderTopApps(data.top_apps || []);
+  setOverviewMetrics(data);
+  renderDonut(data.top_apps || [], Number(data.total_seconds) || 0);
   renderRanking(data.top_apps || []);
-  renderPeriodChart(data);
+
+  const period = renderPeriodChart(data);
+  renderTrendChart(period.labels, period.values);
 
   if (data.updated_at_ts) {
     const stamp = new Date(data.updated_at_ts * 1000).toLocaleTimeString("es-ES", { hour12: false });

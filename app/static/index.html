@@ -46,6 +46,8 @@
         <button id="refresh-btn" type="button">Actualizar</button>
       </section>
 
+      <p id="period-summary" class="period-summary">Período: --</p>
+
       <section class="metrics">
         <article class="card metric-card">
           <span>Tiempo activo</span>
@@ -56,8 +58,8 @@
           <strong id="distinct-apps">--</strong>
         </article>
         <article class="card metric-card">
-          <span>App principal</span>
-          <strong id="top-app">--</strong>
+          <span>Promedio diario</span>
+          <strong id="daily-average">--</strong>
         </article>
         <article class="card metric-card">
           <span>No identificado</span>
@@ -67,18 +69,29 @@
 
       <section class="grid-2">
         <article class="card panel">
-          <h2>Top de aplicaciones</h2>
-          <div id="top-apps-list" class="top-list"></div>
+          <h2>Distribución por app</h2>
+          <div class="donut-layout">
+            <div id="apps-donut" class="donut-chart">
+              <div class="donut-center">
+                <strong id="donut-total">--</strong>
+                <span>activo</span>
+              </div>
+            </div>
+            <div id="apps-legend" class="legend-list"></div>
+          </div>
         </article>
 
         <article class="card panel">
           <h2 id="period-chart-title">Actividad por hora</h2>
           <div id="period-chart" class="hourly-chart"></div>
+          <h3 class="subchart-title">Tendencia</h3>
+          <div id="trend-chart" class="trend-chart"></div>
         </article>
       </section>
 
       <section class="card panel">
         <h2>Ranking del período</h2>
+        <p class="subtitle">Detalle completo por tiempo y porcentaje.</p>
         <div class="table-wrap">
           <table>
             <thead>
