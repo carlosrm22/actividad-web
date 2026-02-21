@@ -6,6 +6,7 @@ const state = {
   endDate: null,
   paused: false,
   categoryMap: {},
+  privacyRules: [],
   lastOverview: null,
 };
 
@@ -136,6 +137,36 @@ function buildOverviewUrl(params = {}) {
     url.searchParams.set("anchor_date", anchorDate);
   }
   return url;
+}
+
+function buildExportUrl(format) {
+  const url = new URL("/api/export/sessions", window.location.origin);
+  url.searchParams.set("format", format);
+  url.searchParams.set("mode", state.mode);
+
+  if (state.mode === "custom") {
+    if (!state.startDate || !state.endDate) {
+      throw new Error("Selecciona inicio/fin para exportar rango personalizado");
+    }
+    url.searchParams.set("start_date", state.startDate);
+    url.searchParams.set("end_date", state.endDate);
+  } else if (state.anchorDate) {
+    url.searchParams.set("anchor_date", state.anchorDate);
+  }
+
+  return url.toString();
+}
+
+function downloadObjectAsJson(payload, filename) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(href);
 }
 
 function formatPeriodSummary(data) {
@@ -558,7 +589,7 @@ async function loadCategories() {
 }
 
 function appCategoryCandidates(byApp) {
-  const ignored = new Set(["Inactivo", "Proceso", "Desconocido"]);
+  const ignored = new Set(["Inactivo", "Proceso", "Desconocido", "Privado"]);
   return (byApp || [])
     .map((row) => row.app)
     .filter((name) => name && !ignored.has(name))
@@ -634,6 +665,120 @@ async function saveCategories() {
   }
 }
 
+function renderPrivacyRules(rules) {
+  const body = qs("privacy-rules-body");
+  if (!rules?.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">Sin reglas.</td></tr>';
+    return;
+  }
+
+  body.innerHTML = rules
+    .map(
+      (rule) => `
+      <tr>
+        <td>${rule.scope === "title" ? "Título" : "Aplicación"}</td>
+        <td>${rule.match_mode}</td>
+        <td><code>${rule.pattern}</code></td>
+        <td class="privacy-enabled"><input class="privacy-toggle" type="checkbox" data-rule-id="${rule.id}" ${
+          rule.enabled ? "checked" : ""
+        } /></td>
+        <td><button class="rule-danger privacy-delete" data-rule-id="${rule.id}" type="button">Eliminar</button></td>
+      </tr>
+    `
+    )
+    .join("");
+}
+
+function updatePrivacySummary() {
+  const enabled = state.privacyRules.filter((r) => Boolean(r.enabled)).length;
+  qs("privacy-summary").textContent = `Reglas activas: ${enabled} / ${state.privacyRules.length}`;
+}
+
+async function loadPrivacyRules() {
+  const data = await fetchJson("/api/privacy/rules");
+  state.privacyRules = data.items || [];
+  renderPrivacyRules(state.privacyRules);
+  updatePrivacySummary();
+}
+
+async function createPrivacyRule() {
+  const scope = qs("privacy-scope").value;
+  const matchMode = qs("privacy-mode").value;
+  const pattern = (qs("privacy-pattern").value || "").trim();
+  if (!pattern) {
+    qs("backup-status").textContent = "Escribe un patrón para la exclusión.";
+    return;
+  }
+
+  await fetchJson("/api/privacy/rules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope, match_mode: matchMode, pattern, enabled: true }),
+  });
+
+  qs("privacy-pattern").value = "";
+  await loadPrivacyRules();
+  qs("backup-status").textContent = "Regla de privacidad agregada.";
+}
+
+async function togglePrivacyRule(ruleId, enabled) {
+  await fetchJson(`/api/privacy/rules/${ruleId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  await loadPrivacyRules();
+}
+
+async function deletePrivacyRule(ruleId) {
+  await fetchJson(`/api/privacy/rules/${ruleId}`, { method: "DELETE" });
+  await loadPrivacyRules();
+}
+
+async function exportCsv() {
+  const url = buildExportUrl("csv");
+  window.location.assign(url);
+}
+
+async function exportJson() {
+  const data = await fetchJson(buildExportUrl("json"));
+  const stamp = new Date().toISOString().replaceAll(":", "-").slice(0, 19);
+  downloadObjectAsJson(data, `actividad-export-${stamp}.json`);
+}
+
+async function exportBackup() {
+  const data = await fetchJson("/api/backup/export");
+  const stamp = new Date().toISOString().replaceAll(":", "-").slice(0, 19);
+  downloadObjectAsJson(data, `actividad-backup-${stamp}.json`);
+  qs("backup-status").textContent = "Backup exportado.";
+}
+
+async function restoreBackup() {
+  const input = qs("restore-file-input");
+  const replace = Boolean(qs("restore-replace").checked);
+  const file = input.files?.[0];
+  if (!file) {
+    qs("backup-status").textContent = "Selecciona un archivo JSON de backup.";
+    return;
+  }
+
+  const raw = await file.text();
+  const payload = JSON.parse(raw);
+
+  qs("backup-status").textContent = "Restaurando...";
+  const url = new URL("/api/backup/restore", window.location.origin);
+  url.searchParams.set("replace", replace ? "1" : "0");
+
+  const result = await fetchJson(url.toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  qs("backup-status").textContent = `Restaurado: sesiones ${result.inserted_sessions}, categorías ${result.saved_categories}, reglas ${result.saved_privacy_rules}.`;
+  await refreshAll();
+}
+
 async function loadRolling30() {
   const end = todayIso();
   const start = addDaysIso(end, -29);
@@ -669,6 +814,10 @@ async function loadHealth() {
 
   if (Array.isArray(data.notes) && data.notes.length > 0) {
     qs("updated-at").textContent = data.notes[0];
+  }
+
+  if (data.privacy && typeof data.privacy.rules_count === "number") {
+    qs("privacy-summary").textContent = `Reglas activas: ${data.privacy.enabled_rules || 0} / ${data.privacy.rules_count}`;
   }
 }
 
@@ -723,7 +872,7 @@ async function togglePause() {
 async function refreshAll() {
   try {
     await loadHealth();
-    await Promise.all([loadOverview(), loadRecent(), loadWindows(), loadRolling30()]);
+    await Promise.all([loadOverview(), loadRecent(), loadWindows(), loadRolling30(), loadPrivacyRules()]);
   } catch (err) {
     setStatus(false, "Error de conexión");
     qs("updated-at").textContent = String(err.message || err);
@@ -785,6 +934,73 @@ function init() {
   qs("save-categories-btn").addEventListener("click", () => {
     saveCategories().catch((err) => {
       qs("category-save-status").textContent = `Error: ${String(err.message || err)}`;
+    });
+  });
+
+  qs("privacy-add-btn").addEventListener("click", () => {
+    createPrivacyRule().catch((err) => {
+      qs("backup-status").textContent = `Error privacidad: ${String(err.message || err)}`;
+    });
+  });
+
+  qs("privacy-rules-body").addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || !target.classList.contains("privacy-toggle")) {
+      return;
+    }
+
+    const id = Number(target.getAttribute("data-rule-id") || "0");
+    if (!id) {
+      return;
+    }
+
+    togglePrivacyRule(id, target.checked).catch((err) => {
+      qs("backup-status").textContent = `Error privacidad: ${String(err.message || err)}`;
+      target.checked = !target.checked;
+    });
+  });
+
+  qs("privacy-rules-body").addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !target.classList.contains("privacy-delete")) {
+      return;
+    }
+
+    const id = Number(target.getAttribute("data-rule-id") || "0");
+    if (!id) {
+      return;
+    }
+
+    deletePrivacyRule(id)
+      .then(() => {
+        qs("backup-status").textContent = "Regla eliminada.";
+      })
+      .catch((err) => {
+        qs("backup-status").textContent = `Error privacidad: ${String(err.message || err)}`;
+      });
+  });
+
+  qs("export-csv-btn").addEventListener("click", () => {
+    exportCsv().catch((err) => {
+      qs("backup-status").textContent = `Error exportando CSV: ${String(err.message || err)}`;
+    });
+  });
+
+  qs("export-json-btn").addEventListener("click", () => {
+    exportJson().catch((err) => {
+      qs("backup-status").textContent = `Error exportando JSON: ${String(err.message || err)}`;
+    });
+  });
+
+  qs("backup-export-btn").addEventListener("click", () => {
+    exportBackup().catch((err) => {
+      qs("backup-status").textContent = `Error exportando backup: ${String(err.message || err)}`;
+    });
+  });
+
+  qs("restore-btn").addEventListener("click", () => {
+    restoreBackup().catch((err) => {
+      qs("backup-status").textContent = `Error restaurando backup: ${String(err.message || err)}`;
     });
   });
 

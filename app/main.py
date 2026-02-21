@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import os
 import time
 from contextlib import asynccontextmanager
@@ -9,13 +11,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from .db import ActivityDB, SessionRow
-from .detector import WindowDetector
+from .db import ActivityDB, PrivacyRuleRow, SessionRow
+from .detector import ActiveWindow, WindowDetector
 from .idle import IdleDetector
+from .privacy import PrivacyFilter, PrivacyRule
 from .tracker import ActivityTracker
 
 
@@ -42,6 +45,43 @@ class CategoryUpdate(BaseModel):
 
 class PauseUpdate(BaseModel):
     paused: bool
+
+
+class PrivacyRuleCreate(BaseModel):
+    scope: str
+    match_mode: str
+    pattern: str
+    enabled: bool = True
+
+
+class PrivacyRuleStateUpdate(BaseModel):
+    enabled: bool
+
+
+class BackupSession(BaseModel):
+    start_ts: int
+    end_ts: int
+    app: str
+    title: str = ""
+    source: str = "restore"
+
+
+class BackupCategory(BaseModel):
+    app: str
+    category: str = "Sin categoría"
+
+
+class BackupPrivacyRule(BaseModel):
+    scope: str
+    match_mode: str
+    pattern: str
+    enabled: bool = True
+
+
+class BackupRestoreRequest(BaseModel):
+    sessions: list[BackupSession] = Field(default_factory=list)
+    categories: list[BackupCategory] = Field(default_factory=list)
+    privacy_rules: list[BackupPrivacyRule] = Field(default_factory=list)
 
 
 def _parse_bool(raw: str | None, default: bool) -> bool:
@@ -115,12 +155,11 @@ def _resolve_range(
     if end_date < start_date:
         raise HTTPException(status_code=400, detail="end_date no puede ser menor que start_date")
 
-    # Rango inclusivo por día para UX.
     start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=tz)
     end = datetime(end_date.year, end_date.month, end_date.day, tzinfo=tz) + timedelta(days=1)
     day_span = (end_date - start_date).days + 1
-    if day_span > 180:
-        raise HTTPException(status_code=400, detail="Rango custom demasiado grande (máximo 180 días)")
+    if day_span > 365:
+        raise HTTPException(status_code=400, detail="Rango custom demasiado grande (máximo 365 días)")
     return RangeSpec(mode=mode_norm, start=start, end=end, anchor_date=anchor)
 
 
@@ -255,6 +294,32 @@ def _build_overview(
     }
 
 
+def _segment_to_item(segment: Segment, tzinfo) -> dict[str, object]:
+    duration = max(0, segment.end_ts - segment.start_ts)
+    return {
+        "start_ts": segment.start_ts,
+        "end_ts": segment.end_ts,
+        "start_iso": datetime.fromtimestamp(segment.start_ts, tz=tzinfo).isoformat(),
+        "end_iso": datetime.fromtimestamp(segment.end_ts, tz=tzinfo).isoformat(),
+        "duration_seconds": duration,
+        "duration_human": _seconds_to_human(duration),
+        "app": segment.app,
+        "title": segment.title,
+        "source": segment.source,
+    }
+
+
+def _privacy_row_payload(row: PrivacyRuleRow) -> dict[str, object]:
+    return {
+        "id": row.id,
+        "scope": row.scope,
+        "match_mode": row.match_mode,
+        "pattern": row.pattern,
+        "enabled": row.enabled,
+        "updated_ts": row.updated_ts,
+    }
+
+
 def create_app() -> FastAPI:
     db_path = os.getenv("ACTIVIDAD_DB_PATH", "data/actividad.db")
     interval_seconds = float(os.getenv("ACTIVIDAD_INTERVAL_SECONDS", "2"))
@@ -265,6 +330,7 @@ def create_app() -> FastAPI:
     db = ActivityDB(db_path)
     detector = WindowDetector()
     idle_detector = IdleDetector(enabled=idle_enabled)
+    privacy_filter = PrivacyFilter(rules=[])
     tracker = ActivityTracker(
         db=db,
         detector=detector,
@@ -272,11 +338,62 @@ def create_app() -> FastAPI:
         idle_detector=idle_detector,
         idle_enabled=idle_enabled,
         idle_threshold_seconds=idle_threshold_seconds,
+        privacy_filter=privacy_filter,
     )
+
+    def refresh_privacy_rules() -> list[PrivacyRuleRow]:
+        rows = db.list_privacy_rules()
+        privacy_filter.update_rules(
+            [
+                PrivacyRule(
+                    id=row.id,
+                    scope=row.scope,
+                    match_mode=row.match_mode,
+                    pattern=row.pattern,
+                    enabled=row.enabled,
+                    updated_ts=row.updated_ts,
+                )
+                for row in rows
+            ]
+        )
+        return rows
+
+    def collect_segments(spec: RangeSpec) -> tuple[list[Segment], int]:
+        range_start = int(spec.start.timestamp())
+        range_end = int(spec.end.timestamp())
+
+        rows = db.overlapping_sessions(range_start, range_end)
+        segments: list[Segment] = []
+        for row in rows:
+            clipped = _clip_segment(row, range_start, range_end)
+            if clipped:
+                segments.append(clipped)
+
+        tracker_status = tracker.status()
+        now_ts = int(time.time())
+        current = tracker_status.get("current")
+        if current and isinstance(current, dict) and (range_start <= now_ts < range_end):
+            current_app = str(current.get("app", "Desconocido"))
+            current_title = str(current.get("title", ""))
+            if not privacy_filter.is_excluded(app=current_app, title=current_title):
+                synthetic = SessionRow(
+                    id=-1,
+                    start_ts=int(current["start_ts"]),
+                    end_ts=now_ts,
+                    app=current_app,
+                    title=current_title,
+                    source=str(current.get("source", "")),
+                )
+                clipped = _clip_segment(synthetic, range_start, range_end)
+                if clipped:
+                    segments.append(clipped)
+
+        return segments, now_ts
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         db.init()
+        refresh_privacy_rules()
         tracker.start()
         try:
             yield
@@ -286,7 +403,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Actividad Web",
         description="Monitor local de actividad tipo ActivityWatch, en español.",
-        version="0.2.0",
+        version="0.3.0",
         lifespan=lifespan,
     )
 
@@ -294,6 +411,7 @@ def create_app() -> FastAPI:
     app.state.detector = detector
     app.state.idle_detector = idle_detector
     app.state.tracker = tracker
+    app.state.privacy_filter = privacy_filter
 
     static_dir = Path(__file__).resolve().parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -307,6 +425,8 @@ def create_app() -> FastAPI:
         caps = detector.capabilities()
         idle_caps = idle_detector.capabilities()
         tracker_status = tracker.status()
+        privacy_rows = db.list_privacy_rules()
+        privacy_stats = privacy_filter.stats()
 
         notes: list[str] = []
         session_type = str(caps.get("session_type", "unknown"))
@@ -367,7 +487,7 @@ def create_app() -> FastAPI:
 
         if idle_enabled and not idle_health["available"]:
             notes.append(
-                "Detección de inactividad no disponible. Instala xprintidle (X11) "
+                "Detección de inactividad no disponible. Instala xprintidle (o xssstate en Fedora) "
                 "o habilita DBus de org.freedesktop.ScreenSaver."
             )
 
@@ -376,6 +496,11 @@ def create_app() -> FastAPI:
             "db_path": db_path,
             "capabilities": caps,
             "idle": idle_health,
+            "privacy": {
+                "rules": [_privacy_row_payload(row) for row in privacy_rows],
+                "rules_count": len(privacy_rows),
+                **privacy_stats,
+            },
             "tracker": tracker_status,
             "notes": notes,
             "timestamp": int(time.time()),
@@ -401,30 +526,7 @@ def create_app() -> FastAPI:
         range_start = int(spec.start.timestamp())
         range_end = int(spec.end.timestamp())
 
-        rows = db.overlapping_sessions(range_start, range_end)
-        segments: list[Segment] = []
-        for row in rows:
-            clipped = _clip_segment(row, range_start, range_end)
-            if clipped:
-                segments.append(clipped)
-
-        tracker_status = tracker.status()
-        now_ts = int(time.time())
-        current = tracker_status.get("current")
-        if current and isinstance(current, dict) and (range_start <= now_ts < range_end):
-            current_start = int(current["start_ts"])
-            synthetic = SessionRow(
-                id=-1,
-                start_ts=current_start,
-                end_ts=now_ts,
-                app=str(current.get("app", "Desconocido")),
-                title=str(current.get("title", "")),
-                source=str(current.get("source", "")),
-            )
-            clipped = _clip_segment(synthetic, range_start, range_end)
-            if clipped:
-                segments.append(clipped)
-
+        segments, now_ts = collect_segments(spec)
         category_map = db.get_app_categories()
         payload = _build_overview(
             segments,
@@ -510,14 +612,19 @@ def create_app() -> FastAPI:
         by_app: dict[str, int] = {}
         items: list[dict[str, object]] = []
         for win in open_windows:
-            by_app[win.app] = by_app.get(win.app, 0) + 1
+            is_private = privacy_filter.is_excluded(app=win.app, title=win.title)
+            app_name = "Privado" if is_private else win.app
+            title = "Oculto por regla de privacidad" if is_private else win.title
+            source = "privacy" if is_private else win.source
+            by_app[app_name] = by_app.get(app_name, 0) + 1
             items.append(
                 {
-                    "app": win.app,
-                    "title": win.title,
-                    "source": win.source,
-                    "pid": win.pid,
-                    "window_id": win.window_id,
+                    "app": app_name,
+                    "title": title,
+                    "source": source,
+                    "pid": None if is_private else win.pid,
+                    "window_id": None if is_private else win.window_id,
+                    "private": is_private,
                 }
             )
 
@@ -526,20 +633,24 @@ def create_app() -> FastAPI:
             for app_name, count in sorted(by_app.items(), key=lambda item: item[1], reverse=True)
         ]
 
+        active_payload: dict[str, object] | None = None
+        if active is not None:
+            active_private = privacy_filter.is_excluded(app=active.app, title=active.title)
+            active_payload = {
+                "app": "Privado" if active_private else active.app,
+                "title": "Oculto por regla de privacidad" if active_private else active.title,
+                "source": "privacy" if active_private else active.source,
+                "pid": None if active_private else active.pid,
+                "window_id": None if active_private else active.window_id,
+                "private": active_private,
+            }
+
         return {
             "count": len(items),
             "distinct_apps": len(by_app),
             "app_counts": app_counts,
             "items": items,
-            "active": {
-                "app": active.app,
-                "title": active.title,
-                "source": active.source,
-                "pid": active.pid,
-                "window_id": active.window_id,
-            }
-            if active
-            else None,
+            "active": active_payload,
         }
 
     @app.get("/api/categories")
@@ -565,6 +676,196 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="app_name no puede ser vacío")
         removed = db.delete_app_category(raw_app)
         return {"ok": True, "removed": removed}
+
+    @app.get("/api/privacy/rules")
+    def list_privacy_rules() -> dict[str, object]:
+        rows = db.list_privacy_rules()
+        return {
+            "count": len(rows),
+            "items": [_privacy_row_payload(row) for row in rows],
+        }
+
+    @app.post("/api/privacy/rules")
+    def create_privacy_rule(payload: PrivacyRuleCreate) -> dict[str, object]:
+        try:
+            row = db.upsert_privacy_rule(
+                scope=payload.scope,
+                match_mode=payload.match_mode,
+                pattern=payload.pattern,
+                enabled=payload.enabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        refresh_privacy_rules()
+        return {"ok": True, "item": _privacy_row_payload(row)}
+
+    @app.patch("/api/privacy/rules/{rule_id}")
+    def patch_privacy_rule(rule_id: int, payload: PrivacyRuleStateUpdate) -> dict[str, object]:
+        row = db.set_privacy_rule_enabled(rule_id=rule_id, enabled=payload.enabled)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Regla no encontrada")
+        refresh_privacy_rules()
+        return {"ok": True, "item": _privacy_row_payload(row)}
+
+    @app.delete("/api/privacy/rules/{rule_id}")
+    def remove_privacy_rule(rule_id: int) -> dict[str, object]:
+        removed = db.delete_privacy_rule(rule_id=rule_id)
+        refresh_privacy_rules()
+        return {"ok": True, "removed": removed}
+
+    @app.get("/api/export/sessions")
+    def export_sessions(
+        format: str = Query(default="json", description="json | csv"),
+        mode: str = Query(default="day", description="day | week | month | custom"),
+        anchor_date: str | None = Query(default=None, description="Fecha base YYYY-MM-DD"),
+        start_date: str | None = Query(default=None, description="Solo custom: YYYY-MM-DD"),
+        end_date: str | None = Query(default=None, description="Solo custom: YYYY-MM-DD (inclusive)"),
+        date: str | None = Query(default=None, description="Compatibilidad legacy (equivale a anchor_date)"),
+    ) -> Response:
+        if date and not anchor_date:
+            anchor_date = date
+
+        fmt = (format or "json").strip().lower()
+        if fmt not in {"json", "csv"}:
+            raise HTTPException(status_code=400, detail="format debe ser json o csv")
+
+        spec = _resolve_range(mode=mode, anchor_date_raw=anchor_date, start_date_raw=start_date, end_date_raw=end_date)
+        segments, now_ts = collect_segments(spec)
+        items = [_segment_to_item(segment, tzinfo=spec.start.tzinfo) for segment in sorted(segments, key=lambda x: x.start_ts)]
+
+        if fmt == "json":
+            return JSONResponse(
+                {
+                    "mode": spec.mode,
+                    "range_start_date": spec.start.date().isoformat(),
+                    "range_end_date_inclusive": (spec.end - timedelta(days=1)).date().isoformat(),
+                    "count": len(items),
+                    "items": items,
+                    "exported_at_ts": now_ts,
+                }
+            )
+
+        output = io.StringIO()
+        writer = csv.DictWriter(
+            output,
+            fieldnames=[
+                "start_iso",
+                "end_iso",
+                "duration_seconds",
+                "duration_human",
+                "app",
+                "title",
+                "source",
+            ],
+        )
+        writer.writeheader()
+        for item in items:
+            writer.writerow(
+                {
+                    "start_iso": item["start_iso"],
+                    "end_iso": item["end_iso"],
+                    "duration_seconds": item["duration_seconds"],
+                    "duration_human": item["duration_human"],
+                    "app": item["app"],
+                    "title": item["title"],
+                    "source": item["source"],
+                }
+            )
+
+        filename = f"actividad-{spec.mode}-{spec.start.date().isoformat()}.csv"
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/backup/export")
+    def export_backup() -> Response:
+        rows = db.all_sessions()
+        category_map = db.get_app_categories()
+        privacy_rows = db.list_privacy_rules()
+
+        sessions_payload = [
+            {
+                "start_ts": row.start_ts,
+                "end_ts": row.end_ts,
+                "app": row.app,
+                "title": row.title,
+                "source": row.source,
+            }
+            for row in rows
+        ]
+        categories_payload = [
+            {"app": app_name, "category": category}
+            for app_name, category in sorted(category_map.items(), key=lambda item: item[0].casefold())
+        ]
+        privacy_payload = [_privacy_row_payload(row) for row in privacy_rows]
+
+        now_ts = int(time.time())
+        payload = {
+            "schema_version": 1,
+            "exported_at_ts": now_ts,
+            "sessions": sessions_payload,
+            "categories": categories_payload,
+            "privacy_rules": privacy_payload,
+        }
+        filename = datetime.now().strftime("actividad-backup-%Y%m%d-%H%M%S.json")
+        return JSONResponse(
+            payload,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.post("/api/backup/restore")
+    def restore_backup(payload: BackupRestoreRequest, replace: bool = Query(default=False)) -> dict[str, object]:
+        was_paused = bool(tracker.status().get("paused"))
+        tracker.set_paused(True)
+
+        inserted_sessions = 0
+        saved_categories = 0
+        saved_rules = 0
+        skipped_rules = 0
+
+        try:
+            if replace:
+                db.clear_sessions()
+                db.clear_app_categories()
+                db.clear_privacy_rules()
+
+            session_rows: list[tuple[int, int, str, str, str]] = []
+            for item in payload.sessions:
+                if item.end_ts <= item.start_ts:
+                    continue
+                session_rows.append((item.start_ts, item.end_ts, item.app, item.title, item.source or "restore"))
+            inserted_sessions = db.bulk_insert_sessions(session_rows)
+
+            category_rows = [(item.app, item.category) for item in payload.categories if item.app.strip()]
+            saved_categories = db.bulk_set_app_categories(category_rows)
+
+            for rule in payload.privacy_rules:
+                try:
+                    db.upsert_privacy_rule(
+                        scope=rule.scope,
+                        match_mode=rule.match_mode,
+                        pattern=rule.pattern,
+                        enabled=rule.enabled,
+                    )
+                    saved_rules += 1
+                except ValueError:
+                    skipped_rules += 1
+
+            refresh_privacy_rules()
+        finally:
+            if not was_paused:
+                tracker.set_paused(False)
+
+        return {
+            "ok": True,
+            "replace": replace,
+            "inserted_sessions": inserted_sessions,
+            "saved_categories": saved_categories,
+            "saved_privacy_rules": saved_rules,
+            "skipped_privacy_rules": skipped_rules,
+        }
 
     @app.post("/api/control/pause")
     def pause_tracking() -> dict[str, object]:

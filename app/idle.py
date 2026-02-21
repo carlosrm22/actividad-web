@@ -7,7 +7,6 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Literal
 
 
 @dataclass
@@ -22,6 +21,7 @@ class IdleDetector:
     def __init__(self, enabled: bool = True) -> None:
         self.enabled = bool(enabled)
         self._has_xprintidle = shutil.which("xprintidle") is not None
+        self._has_xssstate = shutil.which("xssstate") is not None
         self._has_gdbus = shutil.which("gdbus") is not None
         self._lock = threading.Lock()
         self._last_sample = IdleSample(seconds=None, backend="none", available=False, checked_ts=0)
@@ -30,12 +30,16 @@ class IdleDetector:
         backends: list[str] = []
         if self._has_xprintidle:
             backends.append("xprintidle")
+        if self._has_xssstate:
+            backends.append("xssstate")
         if self._has_gdbus:
             backends.append("screensaver_dbus")
 
         preferred = "none"
         if self._has_xprintidle:
             preferred = "xprintidle"
+        elif self._has_xssstate:
+            preferred = "xssstate"
         elif self._has_gdbus:
             preferred = "screensaver_dbus"
 
@@ -61,6 +65,12 @@ class IdleDetector:
             value = self._get_idle_xprintidle()
             if value is not None:
                 self._store(value, "xprintidle", True)
+                return value
+
+        if self._has_xssstate:
+            value = self._get_idle_xssstate()
+            if value is not None:
+                self._store(value, "xssstate", True)
                 return value
 
         if self._has_gdbus:
@@ -108,16 +118,34 @@ class IdleDetector:
             return None
         return out.stdout.strip()
 
+    def _normalize_idle_value(self, raw_value: int) -> int:
+        value = max(0, int(raw_value))
+        if value >= 1000:
+            return value // 1000
+        return value
+
     def _get_idle_xprintidle(self) -> int | None:
         raw = self._run(["xprintidle"], timeout=0.8)
         if not raw:
             return None
         try:
-            # xprintidle devuelve milisegundos
             milliseconds = int(raw.strip())
         except ValueError:
             return None
-        return max(0, milliseconds // 1000)
+        return self._normalize_idle_value(milliseconds)
+
+    def _get_idle_xssstate(self) -> int | None:
+        raw = self._run(["xssstate", "-i"], timeout=0.8)
+        if not raw:
+            return None
+        match = re.search(r"(\d+)", raw)
+        if not match:
+            return None
+        try:
+            milliseconds = int(match.group(1))
+        except ValueError:
+            return None
+        return self._normalize_idle_value(milliseconds)
 
     def _get_idle_screensaver_dbus(self) -> int | None:
         raw = self._run(
@@ -137,9 +165,6 @@ class IdleDetector:
         if not raw:
             return None
 
-        # Ejemplos comunes:
-        # (uint32 12345,)
-        # (12345,)
         match = re.search(r"(\d+)", raw)
         if not match:
             return None
@@ -149,7 +174,4 @@ class IdleDetector:
         except ValueError:
             return None
 
-        # En la práctica suele venir en milisegundos.
-        if value >= 1000:
-            return value // 1000
-        return value
+        return self._normalize_idle_value(value)

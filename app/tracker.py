@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from .db import ActivityDB
 from .detector import ActiveWindow, WindowDetector
 from .idle import IdleDetector
+from .privacy import PrivacyFilter
 
 
 @dataclass
@@ -26,6 +27,7 @@ class ActivityTracker:
         idle_detector: IdleDetector | None = None,
         idle_enabled: bool = True,
         idle_threshold_seconds: int = 60,
+        privacy_filter: PrivacyFilter | None = None,
     ) -> None:
         self.db = db
         self.detector = detector
@@ -33,6 +35,7 @@ class ActivityTracker:
         self.idle_detector = idle_detector
         self.idle_enabled = bool(idle_enabled)
         self.idle_threshold_seconds = max(1, int(idle_threshold_seconds))
+        self.privacy_filter = privacy_filter
 
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -41,6 +44,7 @@ class ActivityTracker:
         self._paused = False
         self._last_idle_seconds: int | None = None
         self._last_idle_backend = "none"
+        self._excluded_matches = 0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -85,6 +89,9 @@ class ActivityTracker:
                     "last_idle_seconds": self._last_idle_seconds,
                     "last_backend": self._last_idle_backend,
                 },
+                "privacy": {
+                    "excluded_matches": self._excluded_matches,
+                },
             }
 
     def _run(self) -> None:
@@ -120,11 +127,14 @@ class ActivityTracker:
             self._flush_locked(now_ts)
             return
 
-        # Evita registrar "Proceso" sin título (suele ser metadata faltante/transitoria).
+        if self._should_exclude(detected):
+            self._excluded_matches += 1
+            self._flush_locked(now_ts)
+            return
+
         if self._is_unidentified(detected):
             if self._current is None:
                 return
-            # Si ya tenemos una sesión útil abierta, no la cortamos por este ruido.
             return
 
         if self._current is None:
@@ -169,3 +179,8 @@ class ActivityTracker:
         app = (detected.app or "").strip().casefold()
         title = (detected.title or "").strip()
         return app in {"proceso", "desconocido"} and not title
+
+    def _should_exclude(self, detected: ActiveWindow) -> bool:
+        if self.privacy_filter is None:
+            return False
+        return self.privacy_filter.is_excluded(app=detected.app, title=detected.title)

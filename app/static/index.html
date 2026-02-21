@@ -166,6 +166,61 @@
         </article>
       </section>
 
+      <section class="grid-2">
+        <article class="card panel">
+          <h2>Privacidad (exclusiones)</h2>
+          <p id="privacy-summary" class="subtitle">Reglas activas: --</p>
+          <div class="privacy-controls">
+            <select id="privacy-scope">
+              <option value="app">Aplicación</option>
+              <option value="title">Título</option>
+            </select>
+            <select id="privacy-mode">
+              <option value="contains">Contiene</option>
+              <option value="exact">Exacto</option>
+              <option value="regex">Regex</option>
+            </select>
+            <input id="privacy-pattern" type="text" placeholder="Patrón sensible (ej: banco, password)" />
+            <button id="privacy-add-btn" type="button">Agregar</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Ámbito</th>
+                  <th>Modo</th>
+                  <th>Patrón</th>
+                  <th>Activa</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="privacy-rules-body">
+                <tr><td colspan="5" class="empty">Sin reglas.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card panel">
+          <h2>Exportación y backup</h2>
+          <p class="subtitle">Exporta estadísticas o guarda/restaura todo el historial.</p>
+          <div class="backup-actions">
+            <button id="export-csv-btn" type="button">Exportar CSV</button>
+            <button id="export-json-btn" type="button">Exportar JSON</button>
+            <button id="backup-export-btn" type="button">Backup completo</button>
+          </div>
+          <div class="backup-restore">
+            <input id="restore-file-input" type="file" accept="application/json" />
+            <label class="checkbox-label" for="restore-replace">
+              <input id="restore-replace" type="checkbox" />
+              Reemplazar datos actuales
+            </label>
+            <button id="restore-btn" type="button" class="secondary-btn">Restaurar backup</button>
+          </div>
+          <p id="backup-status" class="subtitle">--</p>
+        </article>
+      </section>
+
       <section class="card panel">
         <h2>Ranking del período</h2>
         <p id="ranking-subtitle" class="subtitle">Detalle completo por tiempo y porcentaje.</p>
@@ -189,7 +244,7 @@
       <section class="card panel">
         <h2>Apps abiertas ahora</h2>
         <p class="subtitle">
-          Esto muestra ventanas abiertas actualmente (aunque no estén activas). El tiempo activo sigue midiendo solo la ventana en foco.
+          Lista de ventanas detectadas. Si una app/título coincide con una regla de privacidad se mostrará como "Privado".
         </p>
         <div id="open-apps-list" class="top-list"></div>
       </section>

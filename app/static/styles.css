@@ -148,6 +148,7 @@ h1 {
 }
 
 input[type="date"],
+input[type="text"],
 select {
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -159,7 +160,8 @@ input[type="date"] {
   font-family: "JetBrains Mono", monospace;
 }
 
-select {
+select,
+input[type="text"] {
   font-family: "Space Grotesk", sans-serif;
 }
 
@@ -480,6 +482,47 @@ h2 {
   min-width: 170px;
 }
 
+.privacy-controls {
+  display: grid;
+  grid-template-columns: 130px 130px 1fr auto;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.privacy-enabled {
+  display: grid;
+  place-items: center;
+}
+
+.rule-danger {
+  background: #b91c1c;
+}
+
+.rule-danger:hover {
+  background: #991b1b;
+}
+
+.backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.backup-restore {
+  display: grid;
+  gap: 8px;
+  align-items: center;
+}
+
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -554,8 +597,12 @@ th {
     height: 170px;
   }
 
-  .category-actions {
+  .category-actions,
+  .backup-actions,
+  .backup-restore,
+  .privacy-controls {
     display: grid;
     justify-items: start;
+    grid-template-columns: 1fr;
   }
 }
