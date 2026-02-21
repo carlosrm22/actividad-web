@@ -164,6 +164,7 @@ async function loadOverview() {
   qs("total-active").textContent = data.total_human;
   qs("distinct-apps").textContent = String(data.distinct_apps);
   qs("top-app").textContent = data.top_apps?.[0]?.app || "--";
+  qs("unknown-active").textContent = data.unattributed_human || "0s";
   renderTopApps(data.top_apps || []);
   renderHours(data.by_hour_seconds || []);
 

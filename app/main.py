@@ -71,11 +71,19 @@ def _build_overview(segments: list[Segment], range_start: int, range_end: int, t
     by_app: dict[str, int] = {}
     by_hour = [0] * 24
     total_seconds = 0
+    unattributed_seconds = 0
 
     for segment in segments:
         duration = segment.end_ts - segment.start_ts
         total_seconds += duration
-        by_app[segment.app] = by_app.get(segment.app, 0) + duration
+
+        app_label = (segment.app or "").strip()
+        title = (segment.title or "").strip()
+        is_unattributed = app_label.casefold() in {"proceso", "desconocido"} and not title
+        if is_unattributed:
+            unattributed_seconds += duration
+        else:
+            by_app[app_label] = by_app.get(app_label, 0) + duration
 
         cur_dt = datetime.fromtimestamp(segment.start_ts, tz=tzinfo)
         end_dt = datetime.fromtimestamp(segment.end_ts, tz=tzinfo)
@@ -103,6 +111,8 @@ def _build_overview(segments: list[Segment], range_start: int, range_end: int, t
         "range_end_ts": range_end,
         "total_seconds": total_seconds,
         "total_human": _seconds_to_human(total_seconds),
+        "unattributed_seconds": unattributed_seconds,
+        "unattributed_human": _seconds_to_human(unattributed_seconds),
         "distinct_apps": len(by_app),
         "top_apps": top_app_payload,
         "by_hour_seconds": by_hour,

@@ -74,6 +74,13 @@ class ActivityTracker:
             self._flush_locked(now_ts)
             return
 
+        # Evita registrar "Proceso" sin título (suele ser metadata faltante/transitoria).
+        if self._is_unidentified(detected):
+            if self._current is None:
+                return
+            # Si ya tenemos una sesión útil abierta, no la cortamos por este ruido.
+            return
+
         if self._current is None:
             self._current = _CurrentSession(
                 app=detected.app,
@@ -111,3 +118,8 @@ class ActivityTracker:
             source=self._current.source,
         )
         self._current = None
+
+    def _is_unidentified(self, detected: ActiveWindow) -> bool:
+        app = (detected.app or "").strip().casefold()
+        title = (detected.title or "").strip()
+        return app in {"proceso", "desconocido"} and not title
