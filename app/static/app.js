@@ -24,6 +24,28 @@ function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function parseIsoDateUtc(isoDate) {
+  const [year, month, day] = String(isoDate).split("-").map((x) => Number(x));
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+function toIsoDateUtc(dateObj) {
+  return dateObj.toISOString().slice(0, 10);
+}
+
+function addDaysIso(isoDate, days) {
+  const d = parseIsoDateUtc(isoDate);
+  d.setUTCDate(d.getUTCDate() + days);
+  return toIsoDateUtc(d);
+}
+
+function formatShortDate(isoDate) {
+  return parseIsoDateUtc(isoDate).toLocaleDateString("es-ES", {
+    day: "2-digit",
+    month: "short",
+  });
+}
+
 function formatDuration(totalSeconds) {
   const seconds = Math.max(0, Number(totalSeconds) || 0);
   const h = Math.floor(seconds / 3600);
@@ -48,8 +70,7 @@ function formatLocal(ts) {
 }
 
 function formatDayLabel(dayIso) {
-  const d = new Date(`${dayIso}T00:00:00`);
-  return d.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
+  return parseIsoDateUtc(dayIso).toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
 }
 
 function setStatus(ok, text) {
@@ -89,15 +110,6 @@ function formatPeriodSummary(data) {
     return "Período: --";
   }
 
-  const startText = new Date(`${start}T00:00:00`).toLocaleDateString("es-ES", {
-    day: "2-digit",
-    month: "short",
-  });
-  const endText = new Date(`${end}T00:00:00`).toLocaleDateString("es-ES", {
-    day: "2-digit",
-    month: "short",
-  });
-
   const map = {
     day: "Día",
     week: "Semana",
@@ -105,7 +117,7 @@ function formatPeriodSummary(data) {
     custom: "Rango",
   };
   const modeText = map[data.mode] || "Período";
-  return `${modeText}: ${startText} - ${endText}`;
+  return `${modeText}: ${formatShortDate(start)} - ${formatShortDate(end)}`;
 }
 
 function setOverviewMetrics(data) {
@@ -309,6 +321,114 @@ function renderTrendChart(labels, values) {
   `;
 }
 
+function getAverageSeconds(data) {
+  const daysCount = Math.max(1, Number(data.days_count) || 1);
+  const total = Math.max(0, Number(data.total_seconds) || 0);
+  return Math.round(total / daysCount);
+}
+
+function formatDelta(diff, previous, formatter) {
+  if (diff === 0) {
+    return "Sin cambio";
+  }
+
+  const sign = diff > 0 ? "+" : "-";
+  const absPart = formatter(Math.abs(diff));
+  if (previous > 0) {
+    const pct = (diff / previous) * 100;
+    const pctText = `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+    return `${sign}${absPart} (${pctText})`;
+  }
+  return `${sign}${absPart} (base 0)`;
+}
+
+function setDeltaElement(elementId, diff, text, invertDirection = false) {
+  const el = qs(elementId);
+  el.textContent = text;
+  el.classList.remove("up", "down", "neutral");
+
+  let direction = "neutral";
+  if (diff > 0) direction = "up";
+  if (diff < 0) direction = "down";
+  if (invertDirection && direction !== "neutral") {
+    direction = direction === "up" ? "down" : "up";
+  }
+
+  el.classList.add(direction);
+}
+
+function clearComparison(reason) {
+  qs("compare-reference").textContent = reason || "Referencia: --";
+  qs("cmp-total-current").textContent = "--";
+  qs("cmp-avg-current").textContent = "--";
+  qs("cmp-apps-current").textContent = "--";
+  qs("cmp-unknown-current").textContent = "--";
+
+  setDeltaElement("cmp-total-delta", 0, "--");
+  setDeltaElement("cmp-avg-delta", 0, "--");
+  setDeltaElement("cmp-apps-delta", 0, "--");
+  setDeltaElement("cmp-unknown-delta", 0, "--", true);
+}
+
+function buildPreviousRange(current) {
+  const start = current.range_start_date;
+  const daysCount = Math.max(1, Number(current.days_count) || 1);
+  if (!start) {
+    return null;
+  }
+
+  const prevEnd = addDaysIso(start, -1);
+  const prevStart = addDaysIso(prevEnd, -(daysCount - 1));
+  return { start: prevStart, end: prevEnd };
+}
+
+async function loadCustomOverview(startDate, endDate) {
+  const url = new URL("/api/overview", window.location.origin);
+  url.searchParams.set("mode", "custom");
+  url.searchParams.set("start_date", startDate);
+  url.searchParams.set("end_date", endDate);
+
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    throw new Error("No se pudo consultar período comparativo");
+  }
+  return res.json();
+}
+
+function renderComparison(current, previous, previousRange) {
+  qs("compare-reference").textContent = `Referencia: ${formatShortDate(previousRange.start)} - ${formatShortDate(previousRange.end)}`;
+
+  const currentTotal = Number(current.total_seconds) || 0;
+  const currentAvg = getAverageSeconds(current);
+  const currentApps = Number(current.distinct_apps) || 0;
+  const currentUnknown = Number(current.unattributed_seconds) || 0;
+
+  const prevTotal = Number(previous.total_seconds) || 0;
+  const prevAvg = getAverageSeconds(previous);
+  const prevApps = Number(previous.distinct_apps) || 0;
+  const prevUnknown = Number(previous.unattributed_seconds) || 0;
+
+  qs("cmp-total-current").textContent = formatDuration(currentTotal);
+  qs("cmp-avg-current").textContent = formatDuration(currentAvg);
+  qs("cmp-apps-current").textContent = String(currentApps);
+  qs("cmp-unknown-current").textContent = formatDuration(currentUnknown);
+
+  const totalDiff = currentTotal - prevTotal;
+  const avgDiff = currentAvg - prevAvg;
+  const appsDiff = currentApps - prevApps;
+  const unknownDiff = currentUnknown - prevUnknown;
+
+  setDeltaElement("cmp-total-delta", totalDiff, formatDelta(totalDiff, prevTotal, (n) => formatDuration(n)));
+  setDeltaElement("cmp-avg-delta", avgDiff, formatDelta(avgDiff, prevAvg, (n) => formatDuration(n)));
+  setDeltaElement("cmp-apps-delta", appsDiff, formatDelta(appsDiff, prevApps, (n) => String(n)));
+  setDeltaElement(
+    "cmp-unknown-delta",
+    unknownDiff,
+    formatDelta(unknownDiff, prevUnknown, (n) => formatDuration(n)),
+    true
+  );
+}
+
 function renderRecent(items) {
   const body = qs("recent-body");
   if (!items?.length) {
@@ -389,6 +509,18 @@ async function loadOverview() {
 
   const period = renderPeriodChart(data);
   renderTrendChart(period.labels, period.values);
+
+  const previousRange = buildPreviousRange(data);
+  if (!previousRange) {
+    clearComparison("Referencia: sin datos comparativos");
+  } else {
+    try {
+      const previous = await loadCustomOverview(previousRange.start, previousRange.end);
+      renderComparison(data, previous, previousRange);
+    } catch {
+      clearComparison("Referencia: error al cargar comparativo");
+    }
+  }
 
   if (data.updated_at_ts) {
     const stamp = new Date(data.updated_at_ts * 1000).toLocaleTimeString("es-ES", { hour12: false });
