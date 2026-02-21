@@ -61,6 +61,7 @@ class ActivityDB:
     ) -> None:
         if end_ts <= start_ts:
             return
+        app = self._normalize_app_label(app)
         with self._conn() as conn:
             conn.execute(
                 """
@@ -87,7 +88,7 @@ class ActivityDB:
                 id=row["id"],
                 start_ts=row["start_ts"],
                 end_ts=row["end_ts"],
-                app=row["app"],
+                app=self._normalize_app_label(row["app"]),
                 title=row["title"],
                 source=row["source"],
             )
@@ -111,9 +112,17 @@ class ActivityDB:
                 id=row["id"],
                 start_ts=row["start_ts"],
                 end_ts=row["end_ts"],
-                app=row["app"],
+                app=self._normalize_app_label(row["app"]),
                 title=row["title"],
                 source=row["source"],
             )
             for row in rows
         ]
+
+    def _normalize_app_label(self, app: str | None) -> str:
+        value = (app or "").strip()
+        if not value:
+            return "Proceso"
+        if value.casefold() == "desconocido":
+            return "Proceso"
+        return value

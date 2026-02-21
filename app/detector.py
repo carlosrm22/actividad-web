@@ -174,10 +174,9 @@ class WindowDetector:
             return None
 
         title = (data.get("title") or "").strip()
-        app = (data.get("class") or data.get("initialClass") or "Desconocido").strip()
-
-        if not app:
-            app = "Desconocido"
+        app = (data.get("class") or data.get("initialClass") or "").strip()
+        pid = self._coerce_int(data.get("pid"))
+        app = self._resolve_app_name(app=app, pid=pid, title=title)
 
         return ActiveWindow(app=app, title=title, source="hyprctl")
 
@@ -205,8 +204,8 @@ class WindowDetector:
             or self._extract_variant_map_value(raw, "desktopFile")
             or self._extract_variant_map_value(raw, "resourceName")
         )
-        if not app:
-            app = "Desconocido"
+        pid = self._extract_variant_map_int(raw, "pid")
+        app = self._resolve_app_name(app=app, pid=pid, title=title)
 
         return ActiveWindow(app=app, title=title, source="kwin_dbus")
 
@@ -215,23 +214,14 @@ class WindowDetector:
         if not window_id:
             return None
 
-        title = self._extract_quoted(
-            self._run(["xprop", "-id", window_id, "WM_NAME"]) or ""
-        )
+        title = self._extract_quoted(self._run(["xprop", "-id", window_id, "WM_NAME"]) or "")
+        if not title:
+            title = self._extract_quoted(self._run(["xprop", "-id", window_id, "_NET_WM_NAME"]) or "")
         wm_class_raw = self._run(["xprop", "-id", window_id, "WM_CLASS"]) or ""
-        pid_raw = self._run(["xprop", "-id", window_id, "_NET_WM_PID"]) or ""
 
         app = self._extract_last_quoted(wm_class_raw)
-        pid = self._extract_pid(pid_raw)
-
-        if not app and pid is not None:
-            try:
-                app = psutil.Process(pid).name()
-            except (psutil.Error, ProcessLookupError):
-                app = ""
-
-        if not app:
-            app = "Desconocido"
+        pid = self._pid_for_window(window_id)
+        app = self._resolve_app_name(app=app, pid=pid, title=title)
 
         return ActiveWindow(app=app, title=title, source="x11")
 
@@ -269,6 +259,64 @@ class WindowDetector:
         if not match:
             return ""
         return match.group(1).replace("\\'", "'").strip()
+
+    def _extract_variant_map_int(self, text: str, key: str) -> int | None:
+        pattern = rf"'{re.escape(key)}'\s*:\s*<(-?\d+)>"
+        match = re.search(pattern, text)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    def _pid_for_window(self, window_id: str) -> int | None:
+        pid = self._extract_pid(self._run(["xprop", "-id", window_id, "_NET_WM_PID"]) or "")
+        if pid is not None:
+            return pid
+        return self._extract_pid(self._run(["xdotool", "getwindowpid", window_id]) or "")
+
+    def _process_name_from_pid(self, pid: int | None) -> str:
+        if pid is None:
+            return ""
+        try:
+            return psutil.Process(pid).name().strip()
+        except (psutil.Error, ProcessLookupError):
+            return ""
+
+    def _app_from_title(self, title: str) -> str:
+        title = title.strip()
+        if not title:
+            return ""
+        for sep in (" — ", " - ", " | ", " • "):
+            if sep in title:
+                left = title.split(sep, maxsplit=1)[0].strip()
+                if left:
+                    return left
+        return ""
+
+    def _resolve_app_name(self, app: str, pid: int | None, title: str) -> str:
+        app = (app or "").strip()
+        if app:
+            return app
+
+        proc_name = self._process_name_from_pid(pid)
+        if proc_name:
+            return proc_name
+
+        from_title = self._app_from_title(title)
+        if from_title:
+            return from_title
+
+        if pid is not None:
+            return f"Proceso-{pid}"
+        return "Proceso"
+
+    def _coerce_int(self, value: object) -> int | None:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
     def _is_kwin_running(self) -> bool:
         for proc in psutil.process_iter(attrs=["name"]):
