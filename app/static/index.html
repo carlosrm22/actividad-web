@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Actividad Web</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+
+    <main class="container">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">MONITOR DE ACTIVIDAD LOCAL</p>
+          <h1>Actividad Web</h1>
+          <p class="subtitle">Alternativa estilo ActivityWatch, en español y autohospedada.</p>
+        </div>
+        <div class="status-wrap">
+          <span id="status-pill" class="pill">Comprobando...</span>
+          <span id="updated-at" class="updated"></span>
+        </div>
+      </header>
+
+      <section class="panel controls">
+        <label for="date-input">Fecha</label>
+        <input id="date-input" type="date" />
+        <button id="refresh-btn" type="button">Actualizar</button>
+      </section>
+
+      <section class="metrics">
+        <article class="card metric-card">
+          <span>Tiempo activo</span>
+          <strong id="total-active">--</strong>
+        </article>
+        <article class="card metric-card">
+          <span>Apps distintas</span>
+          <strong id="distinct-apps">--</strong>
+        </article>
+        <article class="card metric-card">
+          <span>App principal</span>
+          <strong id="top-app">--</strong>
+        </article>
+      </section>
+
+      <section class="grid-2">
+        <article class="card panel">
+          <h2>Top de aplicaciones</h2>
+          <div id="top-apps-list" class="top-list"></div>
+        </article>
+
+        <article class="card panel">
+          <h2>Actividad por hora</h2>
+          <div id="hourly-chart" class="hourly-chart"></div>
+        </article>
+      </section>
+
+      <section class="card panel">
+        <h2>Sesiones recientes</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Inicio</th>
+                <th>Fin</th>
+                <th>Duración</th>
+                <th>Aplicación</th>
+                <th>Ventana</th>
+              </tr>
+            </thead>
+            <tbody id="recent-body">
+              <tr><td colspan="5" class="empty">Cargando...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

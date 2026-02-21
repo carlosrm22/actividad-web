@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Runtime data
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Local checks/logs created during debugging
+.health*.json
+.overview.json
+.recent.json
+.livecheck*/
+*.log
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
