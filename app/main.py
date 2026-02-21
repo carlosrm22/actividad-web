@@ -4,6 +4,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import date as date_cls
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -25,6 +26,14 @@ class Segment:
     end_ts: int
 
 
+@dataclass
+class RangeSpec:
+    mode: str
+    start: datetime
+    end: datetime
+    anchor_date: date_cls
+
+
 def _seconds_to_human(total_seconds: int) -> str:
     hours, rem = divmod(max(0, int(total_seconds)), 3600)
     minutes, seconds = divmod(rem, 60)
@@ -35,21 +44,63 @@ def _seconds_to_human(total_seconds: int) -> str:
     return f"{seconds}s"
 
 
-def _resolve_day_bounds(date_text: str | None) -> tuple[datetime, datetime]:
+def _parse_iso_date(raw: str, field_name: str) -> date_cls:
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} debe estar en formato YYYY-MM-DD") from exc
+
+
+def _resolve_range(
+    mode: str,
+    anchor_date_raw: str | None,
+    start_date_raw: str | None,
+    end_date_raw: str | None,
+) -> RangeSpec:
     now = datetime.now().astimezone()
     tz = now.tzinfo
+    mode_norm = (mode or "day").strip().lower()
+    if mode_norm not in {"day", "week", "month", "custom"}:
+        raise HTTPException(status_code=400, detail="mode debe ser day, week, month o custom")
 
-    if date_text:
-        try:
-            selected = datetime.strptime(date_text, "%Y-%m-%d").date()
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="La fecha debe estar en formato YYYY-MM-DD") from exc
-    else:
-        selected = now.date()
+    anchor = _parse_iso_date(anchor_date_raw, "anchor_date") if anchor_date_raw else now.date()
 
-    start = datetime(selected.year, selected.month, selected.day, tzinfo=tz)
-    end = start + timedelta(days=1)
-    return start, end
+    if mode_norm == "day":
+        start = datetime(anchor.year, anchor.month, anchor.day, tzinfo=tz)
+        end = start + timedelta(days=1)
+        return RangeSpec(mode=mode_norm, start=start, end=end, anchor_date=anchor)
+
+    if mode_norm == "week":
+        start_date = anchor - timedelta(days=anchor.weekday())
+        start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=tz)
+        end = start + timedelta(days=7)
+        return RangeSpec(mode=mode_norm, start=start, end=end, anchor_date=anchor)
+
+    if mode_norm == "month":
+        start_date = anchor.replace(day=1)
+        if start_date.month == 12:
+            next_month = start_date.replace(year=start_date.year + 1, month=1, day=1)
+        else:
+            next_month = start_date.replace(month=start_date.month + 1, day=1)
+        start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=tz)
+        end = datetime(next_month.year, next_month.month, next_month.day, tzinfo=tz)
+        return RangeSpec(mode=mode_norm, start=start, end=end, anchor_date=anchor)
+
+    if not start_date_raw or not end_date_raw:
+        raise HTTPException(status_code=400, detail="Para mode=custom debes enviar start_date y end_date")
+
+    start_date = _parse_iso_date(start_date_raw, "start_date")
+    end_date = _parse_iso_date(end_date_raw, "end_date")
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="end_date no puede ser menor que start_date")
+
+    # Rango inclusivo por día para UX.
+    start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=tz)
+    end = datetime(end_date.year, end_date.month, end_date.day, tzinfo=tz) + timedelta(days=1)
+    day_span = (end_date - start_date).days + 1
+    if day_span > 180:
+        raise HTTPException(status_code=400, detail="Rango custom demasiado grande (máximo 180 días)")
+    return RangeSpec(mode=mode_norm, start=start, end=end, anchor_date=anchor)
 
 
 def _clip_segment(row: SessionRow, range_start: int, range_end: int) -> Segment | None:
@@ -70,6 +121,7 @@ def _clip_segment(row: SessionRow, range_start: int, range_end: int) -> Segment 
 def _build_overview(segments: list[Segment], range_start: int, range_end: int, tzinfo) -> dict[str, object]:
     by_app: dict[str, int] = {}
     by_hour = [0] * 24
+    by_day: dict[str, int] = {}
     total_seconds = 0
     unattributed_seconds = 0
 
@@ -89,13 +141,17 @@ def _build_overview(segments: list[Segment], range_start: int, range_end: int, t
         end_dt = datetime.fromtimestamp(segment.end_ts, tz=tzinfo)
         while cur_dt < end_dt:
             next_hour = cur_dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-            chunk_end = min(end_dt, next_hour)
-            by_hour[cur_dt.hour] += int((chunk_end - cur_dt).total_seconds())
+            next_day = cur_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            chunk_end = min(end_dt, next_hour, next_day)
+            chunk_seconds = int((chunk_end - cur_dt).total_seconds())
+            by_hour[cur_dt.hour] += chunk_seconds
+            day_key = cur_dt.date().isoformat()
+            by_day[day_key] = by_day.get(day_key, 0) + chunk_seconds
             cur_dt = chunk_end
 
     top_apps = sorted(by_app.items(), key=lambda item: item[1], reverse=True)
     top_app_payload = []
-    for app, seconds in top_apps[:10]:
+    for app, seconds in top_apps[:50]:
         percentage = (seconds / total_seconds * 100.0) if total_seconds else 0.0
         top_app_payload.append(
             {
@@ -105,6 +161,15 @@ def _build_overview(segments: list[Segment], range_start: int, range_end: int, t
                 "percentage": round(percentage, 1),
             }
         )
+
+    by_day_payload = [
+        {
+            "date": day,
+            "seconds": seconds,
+            "human": _seconds_to_human(seconds),
+        }
+        for day, seconds in sorted(by_day.items())
+    ]
 
     return {
         "range_start_ts": range_start,
@@ -116,6 +181,7 @@ def _build_overview(segments: list[Segment], range_start: int, range_end: int, t
         "distinct_apps": len(by_app),
         "top_apps": top_app_payload,
         "by_hour_seconds": by_hour,
+        "by_day": by_day_payload,
     }
 
 
@@ -214,10 +280,19 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/overview")
-    def overview(date: str | None = Query(default=None, description="Formato YYYY-MM-DD")) -> dict[str, object]:
-        day_start, day_end = _resolve_day_bounds(date)
-        range_start = int(day_start.timestamp())
-        range_end = int(day_end.timestamp())
+    def overview(
+        mode: str = Query(default="day", description="day | week | month | custom"),
+        anchor_date: str | None = Query(default=None, description="Fecha base YYYY-MM-DD"),
+        start_date: str | None = Query(default=None, description="Solo custom: YYYY-MM-DD"),
+        end_date: str | None = Query(default=None, description="Solo custom: YYYY-MM-DD (inclusive)"),
+        date: str | None = Query(default=None, description="Compatibilidad legacy (equivale a anchor_date)"),
+    ) -> dict[str, object]:
+        if date and not anchor_date:
+            anchor_date = date
+
+        spec = _resolve_range(mode=mode, anchor_date_raw=anchor_date, start_date_raw=start_date, end_date_raw=end_date)
+        range_start = int(spec.start.timestamp())
+        range_end = int(spec.end.timestamp())
 
         rows = db.overlapping_sessions(range_start, range_end)
         segments: list[Segment] = []
@@ -229,7 +304,7 @@ def create_app() -> FastAPI:
         tracker_status = tracker.status()
         now_ts = int(time.time())
         current = tracker_status.get("current")
-        if current and isinstance(current, dict):
+        if current and isinstance(current, dict) and (range_start <= now_ts < range_end):
             current_start = int(current["start_ts"])
             synthetic = SessionRow(
                 id=-1,
@@ -243,10 +318,43 @@ def create_app() -> FastAPI:
             if clipped:
                 segments.append(clipped)
 
-        payload = _build_overview(segments, range_start, range_end, day_start.tzinfo)
-        payload["date"] = day_start.date().isoformat()
+        payload = _build_overview(segments, range_start, range_end, spec.start.tzinfo)
+        payload["mode"] = spec.mode
+        payload["date"] = spec.start.date().isoformat()
+        payload["anchor_date"] = spec.anchor_date.isoformat()
+        payload["range_start_date"] = spec.start.date().isoformat()
+        payload["range_end_date_exclusive"] = spec.end.date().isoformat()
+        payload["range_end_date_inclusive"] = (spec.end - timedelta(days=1)).date().isoformat()
+        payload["days_count"] = max(1, (spec.end.date() - spec.start.date()).days)
         payload["updated_at_ts"] = now_ts
         return payload
+
+    @app.get("/api/ranking")
+    def ranking(
+        mode: str = Query(default="day", description="day | week | month | custom"),
+        anchor_date: str | None = Query(default=None, description="Fecha base YYYY-MM-DD"),
+        start_date: str | None = Query(default=None, description="Solo custom: YYYY-MM-DD"),
+        end_date: str | None = Query(default=None, description="Solo custom: YYYY-MM-DD (inclusive)"),
+        date: str | None = Query(default=None, description="Compatibilidad legacy (equivale a anchor_date)"),
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> dict[str, object]:
+        base = overview(
+            mode=mode,
+            anchor_date=anchor_date,
+            start_date=start_date,
+            end_date=end_date,
+            date=date,
+        )
+        return {
+            "mode": base["mode"],
+            "range_start_date": base["range_start_date"],
+            "range_end_date_inclusive": base["range_end_date_inclusive"],
+            "total_human": base["total_human"],
+            "unattributed_human": base["unattributed_human"],
+            "items": base["top_apps"][:limit],
+            "count": min(limit, len(base["top_apps"])),
+            "updated_at_ts": base["updated_at_ts"],
+        }
 
     @app.get("/api/recent")
     def recent(limit: int = Query(default=50, ge=1, le=500)) -> dict[str, object]:

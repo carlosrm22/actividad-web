@@ -144,6 +144,7 @@ h1 {
   align-items: center;
   gap: 12px;
   padding: 14px 16px;
+  flex-wrap: wrap;
 }
 
 input[type="date"] {
@@ -152,6 +153,24 @@ input[type="date"] {
   padding: 9px 11px;
   font-family: "JetBrains Mono", monospace;
   background: #fff;
+}
+
+select {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 11px;
+  background: #fff;
+  font-family: "Space Grotesk", sans-serif;
+}
+
+.custom-range {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hidden {
+  display: none !important;
 }
 
 button {
@@ -311,5 +330,10 @@ th {
   .controls {
     display: grid;
     justify-items: start;
+  }
+
+  .custom-range {
+    display: grid;
+    gap: 8px;
   }
 }

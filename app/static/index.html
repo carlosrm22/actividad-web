@@ -28,8 +28,21 @@
       </header>
 
       <section class="panel controls">
-        <label for="date-input">Fecha</label>
-        <input id="date-input" type="date" />
+        <label for="range-mode">Vista</label>
+        <select id="range-mode">
+          <option value="day">Día</option>
+          <option value="week">Semana</option>
+          <option value="month">Mes</option>
+          <option value="custom">Rango</option>
+        </select>
+        <label for="anchor-date">Fecha base</label>
+        <input id="anchor-date" type="date" />
+        <div id="custom-range" class="custom-range hidden">
+          <label for="start-date">Inicio</label>
+          <input id="start-date" type="date" />
+          <label for="end-date">Fin</label>
+          <input id="end-date" type="date" />
+        </div>
         <button id="refresh-btn" type="button">Actualizar</button>
       </section>
 
@@ -59,9 +72,28 @@
         </article>
 
         <article class="card panel">
-          <h2>Actividad por hora</h2>
-          <div id="hourly-chart" class="hourly-chart"></div>
+          <h2 id="period-chart-title">Actividad por hora</h2>
+          <div id="period-chart" class="hourly-chart"></div>
         </article>
+      </section>
+
+      <section class="card panel">
+        <h2>Ranking del período</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Aplicación</th>
+                <th>Tiempo</th>
+                <th>%</th>
+              </tr>
+            </thead>
+            <tbody id="ranking-body">
+              <tr><td colspan="4" class="empty">Cargando...</td></tr>
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section class="card panel">

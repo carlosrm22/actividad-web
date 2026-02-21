@@ -1,9 +1,16 @@
 const state = {
-  date: null,
+  mode: "day",
+  anchorDate: null,
+  startDate: null,
+  endDate: null,
 };
 
 function qs(id) {
   return document.getElementById(id);
+}
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
 }
 
 function formatDuration(totalSeconds) {
@@ -35,33 +42,44 @@ function setStatus(ok, text) {
   pill.classList.toggle("error", !ok);
 }
 
-async function loadHealth() {
-  const res = await fetch("/api/health");
-  if (!res.ok) {
-    throw new Error("No se pudo consultar /api/health");
-  }
-  const data = await res.json();
+function setModeUi(mode) {
+  const custom = qs("custom-range");
+  custom.classList.toggle("hidden", mode !== "custom");
+}
 
-  if (data.tracker?.running) {
-    setStatus(true, "Tracker activo");
-  } else {
-    setStatus(false, "Tracker detenido");
+function formatDayLabel(dayIso) {
+  const d = new Date(`${dayIso}T00:00:00`);
+  return d.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
+}
+
+function buildOverviewUrl() {
+  const url = new URL("/api/overview", window.location.origin);
+  url.searchParams.set("mode", state.mode);
+
+  if (state.mode === "custom") {
+    if (!state.startDate || !state.endDate) {
+      throw new Error("Selecciona inicio y fin para el rango personalizado");
+    }
+    url.searchParams.set("start_date", state.startDate);
+    url.searchParams.set("end_date", state.endDate);
+    return url;
   }
 
-  if (Array.isArray(data.notes) && data.notes.length > 0) {
-    qs("updated-at").textContent = data.notes[0];
+  if (state.anchorDate) {
+    url.searchParams.set("anchor_date", state.anchorDate);
   }
+  return url;
 }
 
 function renderTopApps(topApps) {
   const root = qs("top-apps-list");
   if (!topApps?.length) {
-    root.innerHTML = '<p class="empty">No hay actividad registrada en este día.</p>';
+    root.innerHTML = '<p class="empty">No hay actividad registrada en este período.</p>';
     return;
   }
 
   root.innerHTML = "";
-  for (const item of topApps) {
+  for (const item of topApps.slice(0, 12)) {
     const row = document.createElement("div");
     row.className = "top-row";
     const pct = Math.max(1, Math.round(item.percentage || 0));
@@ -76,24 +94,61 @@ function renderTopApps(topApps) {
   }
 }
 
-function renderHours(byHour) {
-  const root = qs("hourly-chart");
-  if (!Array.isArray(byHour) || byHour.length !== 24) {
-    root.innerHTML = '<p class="empty">Sin datos por hora.</p>';
+function renderRanking(topApps) {
+  const body = qs("ranking-body");
+  if (!topApps?.length) {
+    body.innerHTML = '<tr><td colspan="4" class="empty">Sin datos para este período.</td></tr>';
     return;
   }
 
-  const peak = Math.max(...byHour, 1);
+  body.innerHTML = topApps
+    .slice(0, 25)
+    .map(
+      (item, idx) => `
+      <tr>
+        <td>${idx + 1}</td>
+        <td>${item.app}</td>
+        <td>${item.human}</td>
+        <td>${item.percentage}%</td>
+      </tr>
+    `
+    )
+    .join("");
+}
+
+function renderPeriodChart(data) {
+  const title = qs("period-chart-title");
+  const root = qs("period-chart");
+
+  let labels = [];
+  let values = [];
+
+  if (state.mode === "day") {
+    title.textContent = "Actividad por hora";
+    labels = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, "0")}:00`);
+    values = Array.isArray(data.by_hour_seconds) ? data.by_hour_seconds : [];
+  } else {
+    title.textContent = "Actividad por día";
+    const byDay = Array.isArray(data.by_day) ? data.by_day : [];
+    labels = byDay.map((x) => formatDayLabel(x.date));
+    values = byDay.map((x) => Number(x.seconds || 0));
+  }
+
+  if (!labels.length || !values.length) {
+    root.innerHTML = '<p class="empty">Sin datos para graficar.</p>';
+    return;
+  }
+
+  const peak = Math.max(...values, 1);
   root.innerHTML = "";
 
-  for (let i = 0; i < 24; i += 1) {
-    const value = byHour[i];
+  for (let i = 0; i < labels.length; i += 1) {
+    const value = values[i] || 0;
     const pct = Math.round((value / peak) * 100);
-
     const row = document.createElement("div");
     row.className = "hour-row";
     row.innerHTML = `
-      <span class="hour-label">${String(i).padStart(2, "0")}:00</span>
+      <span class="hour-label">${labels[i]}</span>
       <div class="bar"><span style="width: ${pct}%;"></span></div>
       <span class="hour-value">${formatDuration(value)}</span>
     `;
@@ -149,12 +204,26 @@ function renderOpenApps(data) {
   }
 }
 
-async function loadOverview() {
-  const url = new URL("/api/overview", window.location.origin);
-  if (state.date) {
-    url.searchParams.set("date", state.date);
+async function loadHealth() {
+  const res = await fetch("/api/health");
+  if (!res.ok) {
+    throw new Error("No se pudo consultar /api/health");
+  }
+  const data = await res.json();
+
+  if (data.tracker?.running) {
+    setStatus(true, "Tracker activo");
+  } else {
+    setStatus(false, "Tracker detenido");
   }
 
+  if (Array.isArray(data.notes) && data.notes.length > 0) {
+    qs("updated-at").textContent = data.notes[0];
+  }
+}
+
+async function loadOverview() {
+  const url = buildOverviewUrl();
   const res = await fetch(url.toString());
   if (!res.ok) {
     throw new Error("No se pudo consultar /api/overview");
@@ -165,8 +234,10 @@ async function loadOverview() {
   qs("distinct-apps").textContent = String(data.distinct_apps);
   qs("top-app").textContent = data.top_apps?.[0]?.app || "--";
   qs("unknown-active").textContent = data.unattributed_human || "0s";
+
   renderTopApps(data.top_apps || []);
-  renderHours(data.by_hour_seconds || []);
+  renderRanking(data.top_apps || []);
+  renderPeriodChart(data);
 
   if (data.updated_at_ts) {
     const stamp = new Date(data.updated_at_ts * 1000).toLocaleTimeString("es-ES", { hour12: false });
@@ -203,13 +274,38 @@ async function refreshAll() {
 }
 
 function init() {
-  const input = qs("date-input");
-  const today = new Date().toISOString().slice(0, 10);
-  input.value = today;
-  state.date = today;
+  const modeSelect = qs("range-mode");
+  const anchorInput = qs("anchor-date");
+  const startInput = qs("start-date");
+  const endInput = qs("end-date");
 
-  input.addEventListener("change", () => {
-    state.date = input.value || null;
+  const today = todayIso();
+  state.mode = "day";
+  state.anchorDate = today;
+  state.startDate = today;
+  state.endDate = today;
+
+  modeSelect.value = state.mode;
+  anchorInput.value = today;
+  startInput.value = today;
+  endInput.value = today;
+  setModeUi(state.mode);
+
+  modeSelect.addEventListener("change", () => {
+    state.mode = modeSelect.value;
+    setModeUi(state.mode);
+  });
+
+  anchorInput.addEventListener("change", () => {
+    state.anchorDate = anchorInput.value || todayIso();
+  });
+
+  startInput.addEventListener("change", () => {
+    state.startDate = startInput.value || null;
+  });
+
+  endInput.addEventListener("change", () => {
+    state.endDate = endInput.value || null;
   });
 
   qs("refresh-btn").addEventListener("click", () => {
