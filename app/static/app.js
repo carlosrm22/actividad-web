@@ -142,6 +142,13 @@ function formatDayLabel(dayIso) {
   return parseIsoDateUtc(dayIso).toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
 }
 
+function localIsoDateFromDate(dateObj) {
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, "0");
+  const day = String(dateObj.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
@@ -151,6 +158,292 @@ function formatPercent(part, total) {
     return "0.0";
   }
   return ((part / total) * 100).toFixed(1);
+}
+
+function isAfkLabel(appLabel) {
+  const label = String(appLabel || "")
+    .trim()
+    .toLowerCase();
+  return label === "inactivo" || label === "idle" || label === "afk";
+}
+
+function isSleepLabel(appLabel) {
+  const label = String(appLabel || "")
+    .trim()
+    .toLowerCase();
+  return (
+    label === "suspensión/hibernación" ||
+    label === "suspension/hibernacion" ||
+    label === "suspensión" ||
+    label === "suspension" ||
+    label === "hibernación" ||
+    label === "hibernacion"
+  );
+}
+
+function isPassiveSource(source) {
+  const value = String(source || "")
+    .trim()
+    .toLowerCase();
+  return value.endsWith(":idle") || value === "idle-passive";
+}
+
+function parseSessionTimeMs(item, keyIso, keyTs) {
+  const isoRaw = item?.[keyIso];
+  if (isoRaw) {
+    const ms = Date.parse(String(isoRaw));
+    if (!Number.isNaN(ms)) {
+      return ms;
+    }
+  }
+  const tsRaw = Number(item?.[keyTs] || 0);
+  return tsRaw > 0 ? tsRaw * 1000 : 0;
+}
+
+function ensureDayBucket(dayMap, dayKey) {
+  if (!dayMap.has(dayKey)) {
+    dayMap.set(dayKey, {
+      seconds: 0,
+      active_seconds: 0,
+      effective_seconds: 0,
+      passive_seconds: 0,
+      afk_seconds: 0,
+      sleep_seconds: 0,
+      top_map: {},
+    });
+  }
+  return dayMap.get(dayKey);
+}
+
+function buildTopPayload(counts, totalSeconds) {
+  const keys = Object.keys(counts || {});
+  if (!keys.length) {
+    return {
+      app: "",
+      seconds: 0,
+      human: formatDuration(0),
+      percentage: 0,
+    };
+  }
+
+  let bestApp = "";
+  let bestSeconds = 0;
+  for (const appName of keys) {
+    const seconds = Number(counts[appName] || 0);
+    if (seconds > bestSeconds || (seconds === bestSeconds && appName.localeCompare(bestApp, "es") < 0)) {
+      bestApp = appName;
+      bestSeconds = seconds;
+    }
+  }
+
+  return {
+    app: bestApp,
+    seconds: bestSeconds,
+    human: formatDuration(bestSeconds),
+    percentage: Number(formatPercent(bestSeconds, totalSeconds)),
+  };
+}
+
+function hasOverviewTopBuckets(data) {
+  const hasHourTop =
+    Array.isArray(data.by_hour_top_app) &&
+    data.by_hour_top_app.length === 24 &&
+    data.by_hour_top_app.some((item, idx) => {
+      const hourSeconds = Number((Array.isArray(data.by_hour_seconds) ? data.by_hour_seconds[idx] : 0) || 0);
+      if (hourSeconds <= 0) {
+        return true;
+      }
+      return Boolean(item && String(item.app || "").trim());
+    });
+
+  const hasHourBreakdown =
+    Array.isArray(data.by_hour_active_seconds) &&
+    data.by_hour_active_seconds.length === 24 &&
+    Array.isArray(data.by_hour_effective_seconds) &&
+    data.by_hour_effective_seconds.length === 24 &&
+    Array.isArray(data.by_hour_passive_seconds) &&
+    data.by_hour_passive_seconds.length === 24 &&
+    Array.isArray(data.by_hour_afk_seconds) &&
+    data.by_hour_afk_seconds.length === 24 &&
+    Array.isArray(data.by_hour_sleep_seconds) &&
+    data.by_hour_sleep_seconds.length === 24;
+
+  const hasDayTop =
+    Array.isArray(data.by_day) &&
+    data.by_day.every((row) => {
+      const seconds = Number(row?.seconds || 0);
+      if (seconds <= 0) {
+        return true;
+      }
+      return Boolean(String(row?.top_app || "").trim());
+    });
+
+  return hasHourTop && hasHourBreakdown && hasDayTop;
+}
+
+function classifyBucketKind(appLabel, source) {
+  if (isSleepLabel(appLabel)) {
+    return "sleep";
+  }
+  if (isAfkLabel(appLabel)) {
+    return "afk";
+  }
+  if (isPassiveSource(source)) {
+    return "passive";
+  }
+  return "effective";
+}
+
+function mergeDayBucketsIntoOverview(data, dayMap) {
+  const byDayRows = Array.isArray(data.by_day) ? data.by_day : [];
+
+  if (!byDayRows.length) {
+    data.by_day = Array.from(dayMap.entries())
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]), "es"))
+      .map(([dayKey, bucket]) => {
+        const top = buildTopPayload(bucket.top_map, bucket.seconds);
+        return {
+          date: dayKey,
+          seconds: bucket.seconds,
+          human: formatDuration(bucket.seconds),
+          active_seconds: bucket.active_seconds,
+          active_human: formatDuration(bucket.active_seconds),
+          effective_seconds: bucket.effective_seconds,
+          effective_human: formatDuration(bucket.effective_seconds),
+          passive_seconds: bucket.passive_seconds,
+          passive_human: formatDuration(bucket.passive_seconds),
+          afk_seconds: bucket.afk_seconds,
+          afk_human: formatDuration(bucket.afk_seconds),
+          sleep_seconds: bucket.sleep_seconds,
+          sleep_human: formatDuration(bucket.sleep_seconds),
+          top_app: top.app,
+          top_app_seconds: top.seconds,
+          top_app_human: top.human,
+          top_app_percentage: top.percentage,
+        };
+      });
+    return;
+  }
+
+  data.by_day = byDayRows.map((row) => {
+    const dayKey = String(row?.date || "");
+    const bucket = dayMap.get(dayKey);
+    if (!bucket) {
+      return row;
+    }
+    const top = buildTopPayload(bucket.top_map, bucket.seconds);
+    return {
+      ...row,
+      active_seconds: bucket.active_seconds,
+      active_human: formatDuration(bucket.active_seconds),
+      effective_seconds: bucket.effective_seconds,
+      effective_human: formatDuration(bucket.effective_seconds),
+      passive_seconds: bucket.passive_seconds,
+      passive_human: formatDuration(bucket.passive_seconds),
+      afk_seconds: bucket.afk_seconds,
+      afk_human: formatDuration(bucket.afk_seconds),
+      sleep_seconds: bucket.sleep_seconds,
+      sleep_human: formatDuration(bucket.sleep_seconds),
+      top_app: top.app,
+      top_app_seconds: top.seconds,
+      top_app_human: top.human,
+      top_app_percentage: top.percentage,
+    };
+  });
+}
+
+async function enrichOverviewTopBuckets(data, exportUrlOverride = "") {
+  if (!data || typeof data !== "object" || hasOverviewTopBuckets(data)) {
+    return data;
+  }
+
+  try {
+    const exportUrl = exportUrlOverride || buildExportUrl("json");
+    const exportPayload = await fetchJson(exportUrl);
+    const items = Array.isArray(exportPayload?.items) ? exportPayload.items : [];
+    if (!items.length) {
+      return data;
+    }
+
+    const byHour = Array.from({ length: 24 }, () => 0);
+    const byHourActive = Array.from({ length: 24 }, () => 0);
+    const byHourEffective = Array.from({ length: 24 }, () => 0);
+    const byHourPassive = Array.from({ length: 24 }, () => 0);
+    const byHourAfk = Array.from({ length: 24 }, () => 0);
+    const byHourSleep = Array.from({ length: 24 }, () => 0);
+    const byHourTopMap = Array.from({ length: 24 }, () => ({}));
+    const byDayMap = new Map();
+
+    for (const item of items) {
+      let startMs = parseSessionTimeMs(item, "start_iso", "start_ts");
+      const endMs = parseSessionTimeMs(item, "end_iso", "end_ts");
+      if (!startMs || !endMs || endMs <= startMs) {
+        continue;
+      }
+
+      const appName = String(item?.app || "").trim() || "No identificado";
+      const source = String(item?.source || "");
+      const kind = classifyBucketKind(appName, source);
+
+      while (startMs < endMs) {
+        const current = new Date(startMs);
+        const nextHour = new Date(current);
+        nextHour.setMinutes(0, 0, 0);
+        nextHour.setHours(nextHour.getHours() + 1);
+        const nextDay = new Date(current);
+        nextDay.setHours(24, 0, 0, 0);
+        const chunkEndMs = Math.min(endMs, nextHour.getTime(), nextDay.getTime());
+        const chunkSeconds = Math.max(0, Math.floor((chunkEndMs - startMs) / 1000));
+        if (chunkSeconds <= 0) {
+          break;
+        }
+
+        const hour = current.getHours();
+        const dayKey = localIsoDateFromDate(current);
+        const topMap = byHourTopMap[hour];
+        const dayBucket = ensureDayBucket(byDayMap, dayKey);
+
+        byHour[hour] += chunkSeconds;
+        dayBucket.seconds += chunkSeconds;
+
+        if (kind === "sleep") {
+          byHourSleep[hour] += chunkSeconds;
+          dayBucket.sleep_seconds += chunkSeconds;
+        } else if (kind === "afk") {
+          byHourAfk[hour] += chunkSeconds;
+          dayBucket.afk_seconds += chunkSeconds;
+        } else {
+          byHourActive[hour] += chunkSeconds;
+          dayBucket.active_seconds += chunkSeconds;
+          if (kind === "passive") {
+            byHourPassive[hour] += chunkSeconds;
+            dayBucket.passive_seconds += chunkSeconds;
+          } else {
+            byHourEffective[hour] += chunkSeconds;
+            dayBucket.effective_seconds += chunkSeconds;
+          }
+        }
+
+        topMap[appName] = Number(topMap[appName] || 0) + chunkSeconds;
+        dayBucket.top_map[appName] = Number(dayBucket.top_map[appName] || 0) + chunkSeconds;
+
+        startMs = chunkEndMs;
+      }
+    }
+
+    data.by_hour_seconds = byHour;
+    data.by_hour_active_seconds = byHourActive;
+    data.by_hour_effective_seconds = byHourEffective;
+    data.by_hour_passive_seconds = byHourPassive;
+    data.by_hour_afk_seconds = byHourAfk;
+    data.by_hour_sleep_seconds = byHourSleep;
+    data.by_hour_top_app = byHourTopMap.map((counts, hour) => buildTopPayload(counts, byHour[hour]));
+    mergeDayBucketsIntoOverview(data, byDayMap);
+  } catch (error) {
+    console.warn("[Actividad UI] no se pudieron enriquecer buckets de top app", error);
+  }
+
+  return data;
 }
 
 function escapeHtml(value) {
@@ -464,6 +757,38 @@ function formatPeriodSummary(data) {
   return `${modeText}: ${formatShortDate(start)} - ${formatShortDate(end)}`;
 }
 
+function bindDonutSummaryHover(donut) {
+  if (!(donut instanceof HTMLElement)) {
+    return;
+  }
+  if (donut.getAttribute("data-donut-hover-bound") === "1") {
+    return;
+  }
+
+  bindHoverModal(donut, () => {
+    const payload = donut.__hoverPayload || {};
+    const segments = Array.isArray(payload.segments) ? payload.segments : [];
+    const total = Number(payload.total || 0);
+    const top = segments[0] || null;
+    return {
+      title: "Pastel del período",
+      subtitle: "Detalle por segmento en la leyenda",
+      rows: [
+        { label: "Tiempo total", value: formatDuration(total) },
+        { label: "Segmentos", value: String(segments.length) },
+        {
+          label: "Mayor segmento",
+          value: top
+            ? `${top.app} · ${formatDuration(top.seconds)} (${Number(top.pct || 0).toFixed(1)}%)`
+            : "Sin datos",
+        },
+      ],
+    };
+  });
+
+  donut.setAttribute("data-donut-hover-bound", "1");
+}
+
 function setOverviewMetrics(data) {
   const activeHuman = data.active_human || data.total_human || "0s";
   const effectiveHuman = data.effective_human || activeHuman;
@@ -537,6 +862,8 @@ function renderDonut(topItems) {
   donut.style.background = `conic-gradient(${segments
     .map((s) => `${s.color} ${s.start}% ${s.end}%`)
     .join(", ")})`;
+  donut.__hoverPayload = { segments, total: effectiveTotal };
+  bindDonutSummaryHover(donut);
   legend.innerHTML = "";
   segments.forEach((s, idx) => {
     const row = document.createElement("div");
@@ -1185,7 +1512,14 @@ async function restoreBackup() {
 async function loadRolling30() {
   const end = todayIso();
   const start = addDaysIso(end, -29);
-  const data = await loadCustomOverview(start, end);
+  const exportUrl = new URL("/api/export/sessions", window.location.origin);
+  exportUrl.searchParams.set("format", "json");
+  exportUrl.searchParams.set("mode", "custom");
+  exportUrl.searchParams.set("start_date", start);
+  exportUrl.searchParams.set("end_date", end);
+
+  let data = await loadCustomOverview(start, end);
+  data = await enrichOverviewTopBuckets(data, exportUrl.toString());
 
   const byDay = Array.isArray(data.by_day) ? data.by_day : [];
   const labels = byDay.map((row) => formatDayLabel(row.date));
@@ -1230,7 +1564,8 @@ async function loadHealth() {
 }
 
 async function loadOverview() {
-  const data = await fetchJson(buildOverviewUrl().toString());
+  let data = await fetchJson(buildOverviewUrl().toString());
+  data = await enrichOverviewTopBuckets(data);
   state.lastOverview = data;
 
   setOverviewMetrics(data);
