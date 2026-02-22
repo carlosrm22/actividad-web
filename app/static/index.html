@@ -54,6 +54,10 @@
 
         <button id="refresh-btn" type="button">Actualizar</button>
         <button id="pause-btn" type="button" class="secondary-btn">Pausar</button>
+        <label class="checkbox-label sleep-filter-toggle" for="exclude-sleep-stats">
+          <input id="exclude-sleep-stats" type="checkbox" />
+          Excluir suspensión del análisis
+        </label>
         <label class="checkbox-label tooltip-pin-toggle" for="tooltip-pin-default">
           <input id="tooltip-pin-default" type="checkbox" />
           Bloquear tooltip por defecto
@@ -79,8 +83,8 @@
           <span>Inactividad (AFK)</span>
           <strong id="afk-active">--</strong>
         </article>
-        <article class="card metric-card">
-          <span>Suspensión/Hibernación</span>
+        <article class="card metric-card" id="sleep-metric-card">
+          <span id="sleep-metric-label">Suspensión/Hibernación</span>
           <strong id="sleep-active">--</strong>
         </article>
         <article class="card metric-card">

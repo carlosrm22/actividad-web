@@ -6,6 +6,7 @@ const state = {
   endDate: null,
   paused: false,
   tooltipPinDefault: false,
+  excludeSleepStats: true,
   categoryMap: {},
   privacyRules: [],
   lastOverview: null,
@@ -44,6 +45,7 @@ const CATEGORY_OPTIONS = [
 ];
 
 const TOOLTIP_PIN_DEFAULT_KEY = "actividad.tooltip.pin_default";
+const EXCLUDE_SLEEP_STATS_KEY = "actividad.stats.exclude_sleep";
 
 function qs(id) {
   const el = document.getElementById(id);
@@ -74,7 +76,7 @@ function qs(id) {
 }
 
 function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+  return localIsoDateFromDate(new Date());
 }
 
 function parseIsoDateUtc(isoDate) {
@@ -97,6 +99,26 @@ function loadTooltipPinDefault() {
 function saveTooltipPinDefault(enabled) {
   try {
     window.localStorage.setItem(TOOLTIP_PIN_DEFAULT_KEY, enabled ? "1" : "0");
+  } catch {
+    // Ignore persistence errors (private mode / restricted storage)
+  }
+}
+
+function loadExcludeSleepStats() {
+  try {
+    const raw = window.localStorage.getItem(EXCLUDE_SLEEP_STATS_KEY);
+    if (raw === null) {
+      return true;
+    }
+    return raw === "1";
+  } catch {
+    return true;
+  }
+}
+
+function saveExcludeSleepStats(enabled) {
+  try {
+    window.localStorage.setItem(EXCLUDE_SLEEP_STATS_KEY, enabled ? "1" : "0");
   } catch {
     // Ignore persistence errors (private mode / restricted storage)
   }
@@ -635,7 +657,24 @@ function buildTrendEntryDetails(entry, currentValue, average, peak, deltaText) {
   ];
 }
 
+function normalizeTopAppFields(topAppRaw, topSecondsRaw, topPercentageRaw) {
+  const appName = String(topAppRaw || "");
+  if (state.excludeSleepStats && isSleepLabel(appName)) {
+    return {
+      top_app: "",
+      top_app_seconds: 0,
+      top_app_percentage: 0,
+    };
+  }
+  return {
+    top_app: appName,
+    top_app_seconds: Math.max(0, Number(topSecondsRaw || 0)),
+    top_app_percentage: Math.max(0, Number(topPercentageRaw || 0)),
+  };
+}
+
 function toDayEntryFromPayload(dayRow) {
+  const topApp = normalizeTopAppFields(dayRow.top_app, dayRow.top_app_seconds, dayRow.top_app_percentage);
   return {
     seconds: Number(dayRow.seconds || 0),
     active_seconds: Number(dayRow.active_seconds || dayRow.seconds || 0),
@@ -643,15 +682,14 @@ function toDayEntryFromPayload(dayRow) {
     passive_seconds: Number(dayRow.passive_seconds || 0),
     afk_seconds: Number(dayRow.afk_seconds || 0),
     sleep_seconds: Number(dayRow.sleep_seconds || 0),
-    top_app: dayRow.top_app || "",
-    top_app_seconds: Number(dayRow.top_app_seconds || 0),
-    top_app_percentage: Number(dayRow.top_app_percentage || 0),
+    ...topApp,
   };
 }
 
 function toHourEntryFromPayload(data, hourIndex) {
   const total = Number((Array.isArray(data.by_hour_seconds) ? data.by_hour_seconds[hourIndex] : 0) || 0);
   const top = Array.isArray(data.by_hour_top_app) ? data.by_hour_top_app[hourIndex] || {} : {};
+  const topApp = normalizeTopAppFields(top.app, top.seconds, top.percentage);
   return {
     seconds: total,
     active_seconds: Number((Array.isArray(data.by_hour_active_seconds) ? data.by_hour_active_seconds[hourIndex] : total) || 0),
@@ -659,9 +697,7 @@ function toHourEntryFromPayload(data, hourIndex) {
     passive_seconds: Number((Array.isArray(data.by_hour_passive_seconds) ? data.by_hour_passive_seconds[hourIndex] : 0) || 0),
     afk_seconds: Number((Array.isArray(data.by_hour_afk_seconds) ? data.by_hour_afk_seconds[hourIndex] : 0) || 0),
     sleep_seconds: Number((Array.isArray(data.by_hour_sleep_seconds) ? data.by_hour_sleep_seconds[hourIndex] : 0) || 0),
-    top_app: String(top.app || ""),
-    top_app_seconds: Number(top.seconds || 0),
-    top_app_percentage: Number(top.percentage || 0),
+    ...topApp,
   };
 }
 
@@ -757,50 +793,106 @@ function formatPeriodSummary(data) {
   return `${modeText}: ${formatShortDate(start)} - ${formatShortDate(end)}`;
 }
 
-function bindDonutSummaryHover(donut) {
-  if (!(donut instanceof HTMLElement)) {
-    return;
+function recalculateItemPercentages(rows) {
+  const normalized = Array.isArray(rows)
+    ? rows
+        .map((row) => ({
+          ...row,
+          app: String(row?.app || ""),
+          seconds: Math.max(0, Number(row?.seconds) || 0),
+        }))
+        .filter((row) => row.app)
+    : [];
+
+  const total = normalized.reduce((acc, row) => acc + row.seconds, 0);
+  return normalized.map((row) => ({
+    ...row,
+    human: formatDuration(row.seconds),
+    percentage: Number(formatPercent(row.seconds, total)),
+  }));
+}
+
+function buildOverviewForView(rawData) {
+  if (!rawData || typeof rawData !== "object") {
+    return rawData;
   }
-  if (donut.getAttribute("data-donut-hover-bound") === "1") {
-    return;
+  if (!state.excludeSleepStats) {
+    return rawData;
   }
 
-  bindHoverModal(donut, () => {
-    const payload = donut.__hoverPayload || {};
-    const segments = Array.isArray(payload.segments) ? payload.segments : [];
-    const total = Number(payload.total || 0);
-    const top = segments[0] || null;
+  const sourceByApp = Array.isArray(rawData.by_app) ? rawData.by_app : [];
+  const filteredByApp = recalculateItemPercentages(sourceByApp.filter((row) => !isSleepLabel(row?.app)));
+
+  const sourceByCategory = Array.isArray(rawData.by_category) ? rawData.by_category : [];
+  const totalSleepSeconds = Math.max(0, Number(rawData.sleep_seconds || 0));
+  const categoryWithoutSleep = sourceByCategory.map((row) => {
+    const label = String(row?.app || "");
+    if (label.trim().toLowerCase() !== "sistema") {
+      return row;
+    }
+    const current = Math.max(0, Number(row?.seconds || 0));
     return {
-      title: "Pastel del período",
-      subtitle: "Detalle por segmento en la leyenda",
-      rows: [
-        { label: "Tiempo total", value: formatDuration(total) },
-        { label: "Segmentos", value: String(segments.length) },
-        {
-          label: "Mayor segmento",
-          value: top
-            ? `${top.app} · ${formatDuration(top.seconds)} (${Number(top.pct || 0).toFixed(1)}%)`
-            : "Sin datos",
-        },
-      ],
+      ...row,
+      seconds: Math.max(0, current - totalSleepSeconds),
+    };
+  });
+  const filteredByCategory = recalculateItemPercentages(categoryWithoutSleep);
+
+  const sourceTop = rawData.group_by === "category" ? filteredByCategory : filteredByApp;
+  const filteredTop = sourceTop.slice(0, 50);
+
+  const byHour = Array.isArray(rawData.by_hour_seconds) ? rawData.by_hour_seconds : [];
+  const byHourSleep = Array.isArray(rawData.by_hour_sleep_seconds) ? rawData.by_hour_sleep_seconds : [];
+  const filteredByHour = Array.from({ length: 24 }, (_, idx) => {
+    const total = Math.max(0, Number(byHour[idx] || 0));
+    const sleep = Math.max(0, Number(byHourSleep[idx] || 0));
+    return Math.max(0, total - sleep);
+  });
+
+  const filteredByDay = (Array.isArray(rawData.by_day) ? rawData.by_day : []).map((row) => {
+    const total = Math.max(0, Number(row?.seconds || 0));
+    const sleep = Math.max(0, Number(row?.sleep_seconds || 0));
+    const nextSeconds = Math.max(0, total - sleep);
+    const topAppRaw = String(row?.top_app || "");
+    const isTopSleep = isSleepLabel(topAppRaw);
+    const topSeconds = isTopSleep ? 0 : Math.max(0, Number(row?.top_app_seconds || 0));
+    return {
+      ...row,
+      seconds: nextSeconds,
+      human: formatDuration(nextSeconds),
+      top_app: isTopSleep ? "" : topAppRaw,
+      top_app_seconds: topSeconds,
+      top_app_human: formatDuration(topSeconds),
+      top_app_percentage: Number(formatPercent(topSeconds, nextSeconds)),
     };
   });
 
-  donut.setAttribute("data-donut-hover-bound", "1");
+  return {
+    ...rawData,
+    top_apps: filteredTop,
+    by_app: filteredByApp,
+    by_category: filteredByCategory,
+    by_day: filteredByDay,
+    by_hour_seconds: filteredByHour,
+    distinct_apps: filteredByApp.length,
+  };
 }
 
-function setOverviewMetrics(data) {
+function setOverviewMetrics(data, rawData = data) {
   const activeHuman = data.active_human || data.total_human || "0s";
   const effectiveHuman = data.effective_human || activeHuman;
   const passiveHuman = data.passive_human || "0s";
   const afkHuman = data.afk_human || "0s";
-  const sleepHuman = data.sleep_human || "0s";
+  const sleepHuman = rawData.sleep_human || data.sleep_human || "0s";
 
   qs("total-active").textContent = activeHuman;
   qs("effective-active").textContent = effectiveHuman;
   qs("passive-active").textContent = passiveHuman;
   qs("afk-active").textContent = afkHuman;
   qs("sleep-active").textContent = sleepHuman;
+  qs("sleep-metric-label").textContent = state.excludeSleepStats
+    ? "Suspensión/Hibernación (separada)"
+    : "Suspensión/Hibernación";
   qs("distinct-apps").textContent = String(data.distinct_apps || 0);
   qs("unknown-active").textContent = data.unattributed_human || "0s";
 
@@ -808,13 +900,114 @@ function setOverviewMetrics(data) {
   qs("donut-total").textContent = activeHuman;
 
   const groupedByCategory = (data.group_by || "app") === "category";
-  qs("grouping-summary").textContent = groupedByCategory
-    ? "Agrupado por categoría."
-    : "Agrupado por aplicación.";
+  const groupingText = groupedByCategory ? "Agrupado por categoría." : "Agrupado por aplicación.";
+  qs("grouping-summary").textContent = state.excludeSleepStats
+    ? `${groupingText} Suspensión excluida del análisis.`
+    : groupingText;
 
   qs("ranking-subtitle").textContent = groupedByCategory
     ? "Detalle completo por categoría del período."
     : "Detalle completo por aplicación del período.";
+}
+
+function getDonutSegmentFromEvent(donut, event) {
+  const payload = donut.__hoverPayload || {};
+  const segments = Array.isArray(payload.segments) ? payload.segments : [];
+  if (!segments.length) {
+    return null;
+  }
+
+  const rect = donut.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const dx = Number(event?.clientX || 0) - cx;
+  const dy = Number(event?.clientY || 0) - cy;
+  const radius = Math.min(rect.width, rect.height) / 2;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  const innerRadius = Math.max(0, radius - 24);
+
+  if (distance < innerRadius || distance > radius) {
+    return null;
+  }
+
+  const angleFromTop = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
+  const normalized = ((angleFromTop % 360) + 360) % 360;
+  const pct = (normalized / 360) * 100;
+  return segments.find((segment) => pct >= segment.start && pct < segment.end) || segments[segments.length - 1];
+}
+
+function buildDonutSegmentDetails(segment, totalSeconds) {
+  return {
+    title: segment.app,
+    subtitle: "Segmento del pastel",
+    rows: [
+      { label: "Tiempo", value: formatDuration(segment.seconds) },
+      { label: "Participación", value: `${Number(segment.pct || 0).toFixed(1)}%` },
+      { label: "Total periodo", value: formatDuration(totalSeconds) },
+      {
+        label: "Promedio diario",
+        value: formatDuration(
+          Math.round(totalSeconds / Math.max(1, Number(state.lastOverview?.days_count) || 1))
+        ),
+      },
+    ],
+  };
+}
+
+function bindDonutSegmentHover(donut) {
+  if (!(donut instanceof HTMLElement)) {
+    return;
+  }
+  if (donut.getAttribute("data-donut-segment-bound") === "1") {
+    return;
+  }
+
+  const renderFromEvent = (event, forcePinned = false) => {
+    const payload = donut.__hoverPayload || {};
+    const total = Number(payload.total || 0);
+    const segment = getDonutSegmentFromEvent(donut, event);
+    if (!segment) {
+      if (forcePinned) {
+        hideHoverModal(true);
+      } else {
+        hideHoverModal(false);
+      }
+      return;
+    }
+
+    const autoPin = Boolean(state.tooltipPinDefault);
+    const pinned = forcePinned || autoPin || (hoverModalState.pinned && isSameHoverTarget(hoverModalState.pinTarget, donut));
+    showHoverModal(event, buildDonutSegmentDetails(segment, total), {
+      pinned,
+      target: donut,
+    });
+  };
+
+  donut.classList.add("is-hoverable");
+  donut.addEventListener("mouseenter", (event) => {
+    if (hoverModalState.pinned && !isSameHoverTarget(hoverModalState.pinTarget, donut) && !state.tooltipPinDefault) {
+      return;
+    }
+    renderFromEvent(event, false);
+  });
+  donut.addEventListener("mousemove", (event) => {
+    if (hoverModalState.pinned && !isSameHoverTarget(hoverModalState.pinTarget, donut) && !state.tooltipPinDefault) {
+      return;
+    }
+    renderFromEvent(event, false);
+  });
+  donut.addEventListener("mouseleave", () => {
+    hideHoverModal(false);
+  });
+  donut.addEventListener("click", (event) => {
+    if (hoverModalState.pinned && isSameHoverTarget(hoverModalState.pinTarget, donut)) {
+      hideHoverModal(true);
+      return;
+    }
+    renderFromEvent(event, true);
+  });
+
+  donut.setAttribute("data-donut-segment-bound", "1");
 }
 
 function renderDonut(topItems) {
@@ -863,7 +1056,7 @@ function renderDonut(topItems) {
     .map((s) => `${s.color} ${s.start}% ${s.end}%`)
     .join(", ")})`;
   donut.__hoverPayload = { segments, total: effectiveTotal };
-  bindDonutSummaryHover(donut);
+  bindDonutSegmentHover(donut);
   legend.innerHTML = "";
   segments.forEach((s, idx) => {
     const row = document.createElement("div");
@@ -1520,8 +1713,9 @@ async function loadRolling30() {
 
   let data = await loadCustomOverview(start, end);
   data = await enrichOverviewTopBuckets(data, exportUrl.toString());
+  const viewData = buildOverviewForView(data);
 
-  const byDay = Array.isArray(data.by_day) ? data.by_day : [];
+  const byDay = Array.isArray(viewData.by_day) ? viewData.by_day : [];
   const labels = byDay.map((row) => formatDayLabel(row.date));
   const values = byDay.map((row) => Number(row.seconds || 0));
   const details = byDay.map((row) => ({
@@ -1530,9 +1724,10 @@ async function loadRolling30() {
     ...toDayEntryFromPayload(row),
   }));
 
+  const sleepNote = state.excludeSleepStats ? " · Suspensión excluida" : "";
   qs("rolling30-summary").textContent = `Del ${formatShortDate(start)} al ${formatShortDate(end)} · Activo ${
     data.active_human || data.total_human
-  } · AFK ${data.afk_human || "0s"}`;
+  } · AFK ${data.afk_human || "0s"}${sleepNote}`;
 
   renderMiniSeries("rolling30-chart", labels, values, details);
 }
@@ -1564,23 +1759,25 @@ async function loadHealth() {
 }
 
 async function loadOverview() {
-  let data = await fetchJson(buildOverviewUrl().toString());
-  data = await enrichOverviewTopBuckets(data);
-  state.lastOverview = data;
+  let rawData = await fetchJson(buildOverviewUrl().toString());
+  rawData = await enrichOverviewTopBuckets(rawData);
+  state.lastOverview = rawData;
+  const data = buildOverviewForView(rawData);
 
-  setOverviewMetrics(data);
+  setOverviewMetrics(data, rawData);
   renderDonut(data.top_apps || []);
   renderRanking(data.top_apps || []);
 
   const period = renderPeriodChart(data);
   renderTrendChart(period.labels, period.values, period.entries || []);
 
-  const previousRange = buildPreviousRange(data);
+  const previousRange = buildPreviousRange(rawData);
   if (!previousRange) {
     clearComparison("Referencia: sin datos comparativos");
   } else {
     try {
-      const previous = await loadCustomOverview(previousRange.start, previousRange.end);
+      const previousRaw = await loadCustomOverview(previousRange.start, previousRange.end);
+      const previous = buildOverviewForView(previousRaw);
       renderComparison(data, previous, previousRange);
     } catch {
       clearComparison("Referencia: error al cargar comparativo");
@@ -1590,8 +1787,8 @@ async function loadOverview() {
   const categories = await loadCategories();
   renderCategoryEditor(data.by_app || [], categories);
 
-  if (data.updated_at_ts) {
-    const stamp = new Date(data.updated_at_ts * 1000).toLocaleTimeString("es-ES", { hour12: false });
+  if (rawData.updated_at_ts) {
+    const stamp = new Date(rawData.updated_at_ts * 1000).toLocaleTimeString("es-ES", { hour12: false });
     qs("updated-at").textContent = `Actualizado ${stamp}`;
   }
 }
@@ -1628,6 +1825,7 @@ function init() {
   const anchorInput = qs("anchor-date");
   const startInput = qs("start-date");
   const endInput = qs("end-date");
+  const excludeSleepInput = qs("exclude-sleep-stats");
   const tooltipPinInput = qs("tooltip-pin-default");
 
   const today = todayIso();
@@ -1636,6 +1834,7 @@ function init() {
   state.anchorDate = today;
   state.startDate = today;
   state.endDate = today;
+  state.excludeSleepStats = loadExcludeSleepStats();
   state.tooltipPinDefault = loadTooltipPinDefault();
 
   modeSelect.value = state.mode;
@@ -1643,6 +1842,7 @@ function init() {
   anchorInput.value = today;
   startInput.value = today;
   endInput.value = today;
+  excludeSleepInput.checked = state.excludeSleepStats;
   tooltipPinInput.checked = state.tooltipPinDefault;
   setModeUi(state.mode);
 
@@ -1665,6 +1865,13 @@ function init() {
 
   endInput.addEventListener("change", () => {
     state.endDate = endInput.value || null;
+  });
+
+  excludeSleepInput.addEventListener("change", () => {
+    state.excludeSleepStats = Boolean(excludeSleepInput.checked);
+    saveExcludeSleepStats(state.excludeSleepStats);
+    hideHoverModal(true);
+    refreshAll();
   });
 
   tooltipPinInput.addEventListener("change", () => {
