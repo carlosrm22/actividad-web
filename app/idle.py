@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from typing import Iterable
 
 
 @dataclass
@@ -23,6 +24,7 @@ class IdleDetector:
         self._has_xprintidle = shutil.which("xprintidle") is not None
         self._has_xssstate = shutil.which("xssstate") is not None
         self._has_gdbus = shutil.which("gdbus") is not None
+        self._has_loginctl = shutil.which("loginctl") is not None
         self._lock = threading.Lock()
         self._last_sample = IdleSample(seconds=None, backend="none", available=False, checked_ts=0)
 
@@ -34,6 +36,8 @@ class IdleDetector:
             backends.append("xssstate")
         if self._has_gdbus:
             backends.append("screensaver_dbus")
+        if self._has_loginctl:
+            backends.append("logind")
 
         preferred = "none"
         if self._has_xprintidle:
@@ -42,6 +46,8 @@ class IdleDetector:
             preferred = "xssstate"
         elif self._has_gdbus:
             preferred = "screensaver_dbus"
+        elif self._has_loginctl:
+            preferred = "logind"
 
         with self._lock:
             sample = self._last_sample
@@ -77,6 +83,12 @@ class IdleDetector:
             value = self._get_idle_screensaver_dbus()
             if value is not None:
                 self._store(value, "screensaver_dbus", True)
+                return value
+
+        if self._has_loginctl:
+            value = self._get_idle_logind()
+            if value is not None:
+                self._store(value, "logind", True)
                 return value
 
         self._store(None, "none", False)
@@ -175,3 +187,97 @@ class IdleDetector:
             return None
 
         return self._normalize_idle_value(value)
+
+    def _read_uptime_usec(self) -> int | None:
+        try:
+            with open("/proc/uptime", "r", encoding="utf-8") as fh:
+                content = fh.read().strip().split()
+        except OSError:
+            return None
+        if not content:
+            return None
+        try:
+            seconds = float(content[0])
+        except ValueError:
+            return None
+        return int(seconds * 1_000_000)
+
+    def _parse_key_value_lines(self, raw: str) -> dict[str, str]:
+        data: dict[str, str] = {}
+        for line in raw.splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key.strip()] = value.strip()
+        return data
+
+    def _first_non_empty(self, values: Iterable[str]) -> str:
+        for value in values:
+            if value.strip():
+                return value.strip()
+        return ""
+
+    def _resolve_logind_session_id(self) -> str:
+        env_session_id = os.getenv("XDG_SESSION_ID", "").strip()
+        if env_session_id:
+            return env_session_id
+
+        uid = str(os.getuid())
+        raw = self._run(["loginctl", "show-user", uid, "-p", "Display", "-p", "Sessions", "--no-pager"], timeout=1.4)
+        if not raw:
+            return ""
+
+        data = self._parse_key_value_lines(raw)
+        display_session = data.get("Display", "").strip()
+        if display_session:
+            return display_session
+
+        sessions = [item.strip() for item in data.get("Sessions", "").split() if item.strip()]
+        return self._first_non_empty(sessions)
+
+    def _get_idle_logind(self) -> int | None:
+        session_id = self._resolve_logind_session_id()
+        if not session_id:
+            return None
+
+        raw = self._run(
+            [
+                "loginctl",
+                "show-session",
+                session_id,
+                "-p",
+                "Active",
+                "-p",
+                "IdleHint",
+                "-p",
+                "IdleSinceHintMonotonic",
+                "-p",
+                "Type",
+                "--no-pager",
+            ],
+            timeout=1.4,
+        )
+        if not raw:
+            return None
+
+        data = self._parse_key_value_lines(raw)
+        if data.get("Active", "").strip().lower() not in {"yes", "true", "1"}:
+            return None
+
+        idle_hint = data.get("IdleHint", "").strip().lower()
+        if idle_hint in {"no", "false", "0", ""}:
+            return 0
+
+        try:
+            idle_since_mono = int(data.get("IdleSinceHintMonotonic", "0") or "0")
+        except ValueError:
+            return None
+        if idle_since_mono <= 0:
+            return 0
+
+        uptime_usec = self._read_uptime_usec()
+        if uptime_usec is None:
+            return None
+
+        idle_usec = max(0, uptime_usec - idle_since_mono)
+        return idle_usec // 1_000_000

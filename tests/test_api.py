@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 
 def test_health_includes_idle_privacy_and_tracker(client_app):
     client, _app = client_app
@@ -16,7 +18,10 @@ def test_health_includes_idle_privacy_and_tracker(client_app):
 
 
 def test_overview_and_export_endpoints(client_app, today_iso):
-    client, _app = client_app
+    client, app = client_app
+
+    now = int(time.time())
+    app.state.db.insert_session(now - 7200, now - 1800, "Kwin Wayland", "", "kdotool")
 
     overview = client.get(
         "/api/overview",
@@ -25,7 +30,10 @@ def test_overview_and_export_endpoints(client_app, today_iso):
     assert overview.status_code == 200
     overview_payload = overview.json()
     assert overview_payload["active_seconds"] > 0
+    assert overview_payload["effective_seconds"] >= 0
+    assert overview_payload["passive_seconds"] >= 0
     assert overview_payload["afk_seconds"] > 0
+    assert overview_payload["sleep_seconds"] > 0
 
     export_json = client.get(
         "/api/export/sessions",

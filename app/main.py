@@ -182,11 +182,45 @@ def _is_afk_label(app_label: str) -> bool:
     return app_label.strip().casefold() in {"inactivo", "idle", "afk"}
 
 
+def _is_sleep_label(app_label: str) -> bool:
+    normalized = app_label.strip().casefold()
+    return normalized in {
+        "suspensión/hibernación",
+        "suspension/hibernacion",
+        "suspensión",
+        "suspension",
+        "hibernación",
+        "hibernacion",
+    }
+
+
+def _is_passive_source(source: str) -> bool:
+    value = (source or "").strip().casefold()
+    return value.endswith(":idle") or value == "idle-passive"
+
+
+def _looks_like_sleep_false_focus(app_label: str, title: str, source: str, duration: int) -> bool:
+    app_norm = (app_label or "").strip().casefold()
+    title_norm = (title or "").strip()
+    source_norm = (source or "").strip().casefold()
+    return (
+        app_norm in {"kwin wayland", "kwin_wayland"}
+        and not title_norm
+        and source_norm.startswith("kdotool")
+        and duration >= 900
+    )
+
+
 def _category_for_app(app_label: str, category_map: dict[str, str]) -> str:
     app = (app_label or "").strip()
     if _is_afk_label(app):
         return "Inactividad"
-    if app.casefold() in {"proceso", "desconocido"}:
+    if _is_sleep_label(app):
+        return "Sistema"
+    app_norm = app.casefold()
+    if app_norm in {"kwin wayland", "kwin_wayland", "plasmashell"}:
+        return "Sistema"
+    if app_norm in {"proceso", "desconocido"}:
         return "No identificado"
     return category_map.get(app, "Sin categoría")
 
@@ -222,7 +256,10 @@ def _build_overview(
     by_day: dict[str, int] = {}
     total_seconds = 0
     active_seconds = 0
+    effective_seconds = 0
+    passive_seconds = 0
     afk_seconds = 0
+    sleep_seconds = 0
     unattributed_seconds = 0
 
     for segment in segments:
@@ -232,22 +269,37 @@ def _build_overview(
         app_label = (segment.app or "").strip()
         title = (segment.title or "").strip()
         is_afk = _is_afk_label(app_label)
-        if is_afk:
+        is_sleep = _is_sleep_label(app_label) or _looks_like_sleep_false_focus(
+            app_label=app_label,
+            title=title,
+            source=segment.source,
+            duration=duration,
+        )
+        is_passive = _is_passive_source(segment.source)
+        app_for_stats = "Suspensión/Hibernación" if is_sleep else app_label
+
+        if is_sleep:
+            sleep_seconds += duration
+        elif is_afk:
             afk_seconds += duration
         else:
             active_seconds += duration
+            if is_passive:
+                passive_seconds += duration
+            else:
+                effective_seconds += duration
 
-        is_unattributed = app_label.casefold() in {"proceso", "desconocido"} and not title
+        is_unattributed = app_for_stats.casefold() in {"proceso", "desconocido"} and not title
         if is_unattributed:
             unattributed_seconds += duration
         else:
-            by_app[app_label] = by_app.get(app_label, 0) + duration
-            category_label = _category_for_app(app_label, category_map)
+            by_app[app_for_stats] = by_app.get(app_for_stats, 0) + duration
+            category_label = _category_for_app(app_for_stats, category_map)
             by_category[category_label] = by_category.get(category_label, 0) + duration
             if group_by == "category":
                 by_group[category_label] = by_group.get(category_label, 0) + duration
             else:
-                by_group[app_label] = by_group.get(app_label, 0) + duration
+                by_group[app_for_stats] = by_group.get(app_for_stats, 0) + duration
 
         cur_dt = datetime.fromtimestamp(segment.start_ts, tz=tzinfo)
         end_dt = datetime.fromtimestamp(segment.end_ts, tz=tzinfo)
@@ -280,8 +332,14 @@ def _build_overview(
         "total_human": _seconds_to_human(total_seconds),
         "active_seconds": active_seconds,
         "active_human": _seconds_to_human(active_seconds),
+        "effective_seconds": effective_seconds,
+        "effective_human": _seconds_to_human(effective_seconds),
+        "passive_seconds": passive_seconds,
+        "passive_human": _seconds_to_human(passive_seconds),
         "afk_seconds": afk_seconds,
         "afk_human": _seconds_to_human(afk_seconds),
+        "sleep_seconds": sleep_seconds,
+        "sleep_human": _seconds_to_human(sleep_seconds),
         "unattributed_seconds": unattributed_seconds,
         "unattributed_human": _seconds_to_human(unattributed_seconds),
         "distinct_apps": len(by_app),
@@ -326,6 +384,8 @@ def create_app() -> FastAPI:
 
     idle_enabled = _parse_bool(os.getenv("ACTIVIDAD_IDLE_ENABLED"), True)
     idle_threshold_seconds = int(os.getenv("ACTIVIDAD_IDLE_THRESHOLD_SECONDS", "60"))
+    effective_idle_seconds = int(os.getenv("ACTIVIDAD_EFFECTIVE_IDLE_SECONDS", "8"))
+    sleep_gap_seconds = int(os.getenv("ACTIVIDAD_SLEEP_GAP_SECONDS", "90"))
 
     db = ActivityDB(db_path)
     detector = WindowDetector()
@@ -338,6 +398,8 @@ def create_app() -> FastAPI:
         idle_detector=idle_detector,
         idle_enabled=idle_enabled,
         idle_threshold_seconds=idle_threshold_seconds,
+        effective_idle_seconds=effective_idle_seconds,
+        sleep_gap_seconds=sleep_gap_seconds,
         privacy_filter=privacy_filter,
     )
 
@@ -476,6 +538,8 @@ def create_app() -> FastAPI:
         idle_health = {
             "enabled": idle_enabled,
             "threshold_seconds": idle_threshold_seconds,
+            "effective_idle_seconds": effective_idle_seconds,
+            "sleep_gap_seconds": sleep_gap_seconds,
             "available": bool(idle_caps.get("available")),
             "backends": idle_caps.get("backends", []),
             "preferred_backend": idle_caps.get("preferred_backend", "none"),
@@ -489,6 +553,12 @@ def create_app() -> FastAPI:
             notes.append(
                 "Detección de inactividad no disponible. Instala xprintidle (o xssstate en Fedora) "
                 "o habilita DBus de org.freedesktop.ScreenSaver."
+            )
+
+        if idle_enabled and idle_health.get("available") and idle_health.get("last_backend") in {"none", "disabled"}:
+            notes.append(
+                "El backend idle está disponible pero no está entregando muestras todavía. "
+                "Durante ese periodo el tiempo efectivo puede no ser preciso."
             )
 
         return {
@@ -571,7 +641,10 @@ def create_app() -> FastAPI:
             "range_end_date_inclusive": base["range_end_date_inclusive"],
             "total_human": base["total_human"],
             "active_human": base.get("active_human", base["total_human"]),
+            "effective_human": base.get("effective_human", base.get("active_human", base["total_human"])),
+            "passive_human": base.get("passive_human", "0s"),
             "afk_human": base.get("afk_human", "0s"),
+            "sleep_human": base.get("sleep_human", "0s"),
             "unattributed_human": base["unattributed_human"],
             "items": base["top_apps"][:limit],
             "count": min(limit, len(base["top_apps"])),

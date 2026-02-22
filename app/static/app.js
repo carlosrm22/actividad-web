@@ -187,18 +187,19 @@ function formatPeriodSummary(data) {
 }
 
 function setOverviewMetrics(data) {
-  const activeSeconds = Number(data.active_seconds ?? data.total_seconds ?? 0);
   const activeHuman = data.active_human || data.total_human || "0s";
+  const effectiveHuman = data.effective_human || activeHuman;
+  const passiveHuman = data.passive_human || "0s";
   const afkHuman = data.afk_human || "0s";
+  const sleepHuman = data.sleep_human || "0s";
 
   qs("total-active").textContent = activeHuman;
+  qs("effective-active").textContent = effectiveHuman;
+  qs("passive-active").textContent = passiveHuman;
   qs("afk-active").textContent = afkHuman;
+  qs("sleep-active").textContent = sleepHuman;
   qs("distinct-apps").textContent = String(data.distinct_apps || 0);
   qs("unknown-active").textContent = data.unattributed_human || "0s";
-
-  const daysCount = Math.max(1, Number(data.days_count) || 1);
-  const dailyAverage = Math.round(activeSeconds / daysCount);
-  qs("daily-average").textContent = formatDuration(dailyAverage);
 
   qs("period-summary").textContent = formatPeriodSummary(data);
   qs("donut-total").textContent = activeHuman;

@@ -6,6 +6,8 @@ App local para Linux que monitorea ventana activa, inactividad (AFK) y estadíst
 
 - Registra sesiones por aplicación/ventana.
 - Detecta inactividad y la guarda como `Inactivo`.
+- Detecta suspensión/hibernación y la registra como `Suspensión/Hibernación`.
+- Calcula tiempo efectivo (con input reciente) y tiempo pasivo sin input.
 - Guarda datos en SQLite (`data/actividad.db`).
 - Permite pausar/reanudar tracking.
 - Permite categorizar aplicaciones.
@@ -25,6 +27,8 @@ App local para Linux que monitorea ventana activa, inactividad (AFK) y estadíst
   - `kdotool`
 - AFK en X11/XWayland:
   - `xprintidle` (si existe en tu distro) o `xssstate`
+- AFK en Wayland/KDE sin backend X11:
+  - `loginctl` (logind), usado como fallback automático
 
 ### Fedora 43
 
@@ -62,6 +66,8 @@ Abrir en navegador:
 - `ACTIVIDAD_ENABLE_KWIN_DBUS` (default: `0`)
 - `ACTIVIDAD_IDLE_ENABLED` (default: `1`)
 - `ACTIVIDAD_IDLE_THRESHOLD_SECONDS` (default: `60`)
+- `ACTIVIDAD_EFFECTIVE_IDLE_SECONDS` (default: `8`)
+- `ACTIVIDAD_SLEEP_GAP_SECONDS` (default: `90`)
 
 ## API principal
 
@@ -129,6 +135,8 @@ ACTIVIDAD_ENABLE_KWIN_DBUS=0
 ACTIVIDAD_INTERVAL_SECONDS=2
 ACTIVIDAD_IDLE_ENABLED=1
 ACTIVIDAD_IDLE_THRESHOLD_SECONDS=60
+ACTIVIDAD_EFFECTIVE_IDLE_SECONDS=8
+ACTIVIDAD_SLEEP_GAP_SECONDS=90
 ACTIVIDAD_DB_PATH=/home/$USER/actividad-web/data/actividad.db
 EOF_ENV
 ```

@@ -209,8 +209,8 @@ button:hover {
   gap: 12px;
 }
 
-.metrics-5 {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+.metrics-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
 .metric-card {
@@ -551,10 +551,6 @@ th {
 }
 
 @media (max-width: 1100px) {
-  .metrics-5 {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .compare-grid-5 {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -569,7 +565,7 @@ th {
     justify-items: start;
   }
 
-  .metrics-5,
+  .metrics-grid,
   .compare-grid-5 {
     grid-template-columns: 1fr;
   }
