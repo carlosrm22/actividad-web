@@ -59,6 +59,45 @@ Abrir en navegador:
 
 - http://127.0.0.1:18765
 
+## Comando rápido `actividad` (recomendado)
+
+Para reiniciar/diagnosticar rápido cuando se cuelgue, crea este helper en `~/bin`:
+
+```bash
+mkdir -p ~/bin
+cat > ~/bin/actividad <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+uid="$(id -u)"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
+service="actividad-web.service"
+action="${1:-restart}"
+
+case "$action" in
+  restart) systemctl --user restart "$service"; systemctl --user status "$service" --no-pager -l ;;
+  start)   systemctl --user start "$service";   systemctl --user status "$service" --no-pager -l ;;
+  stop)    systemctl --user stop "$service";    systemctl --user status "$service" --no-pager -l || true ;;
+  status)  systemctl --user status "$service" --no-pager -l ;;
+  logs)    journalctl --user -u "$service" -n 80 --no-pager ;;
+  open)    xdg-open "http://127.0.0.1:18765" >/dev/null 2>&1 & ;;
+  *) echo "Uso: actividad [restart|start|stop|status|logs|open]"; exit 2 ;;
+esac
+EOF
+chmod +x ~/bin/actividad
+hash -r
+```
+
+Uso:
+
+```bash
+actividad
+actividad status
+actividad logs
+actividad open
+```
+
 ## Variables opcionales
 
 - `ACTIVIDAD_DB_PATH` (default: `data/actividad.db`)

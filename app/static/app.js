@@ -38,7 +38,31 @@ const CATEGORY_OPTIONS = [
 ];
 
 function qs(id) {
-  return document.getElementById(id);
+  const el = document.getElementById(id);
+  if (el) {
+    return el;
+  }
+
+  console.warn(`[Actividad UI] elemento faltante: #${id}`);
+  return {
+    textContent: "",
+    innerHTML: "",
+    value: "",
+    checked: false,
+    files: null,
+    style: {},
+    classList: {
+      add() {},
+      remove() {},
+      toggle() {},
+    },
+    appendChild() {},
+    addEventListener() {},
+    setAttribute() {},
+    getAttribute() {
+      return "";
+    },
+  };
 }
 
 function todayIso() {
