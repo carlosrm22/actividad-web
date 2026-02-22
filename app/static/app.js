@@ -5,6 +5,7 @@ const state = {
   startDate: null,
   endDate: null,
   paused: false,
+  tooltipPinDefault: false,
   categoryMap: {},
   privacyRules: [],
   lastOverview: null,
@@ -41,6 +42,8 @@ const CATEGORY_OPTIONS = [
   "Sistema",
   "Inactividad",
 ];
+
+const TOOLTIP_PIN_DEFAULT_KEY = "actividad.tooltip.pin_default";
 
 function qs(id) {
   const el = document.getElementById(id);
@@ -81,6 +84,22 @@ function parseIsoDateUtc(isoDate) {
 
 function toIsoDateUtc(dateObj) {
   return dateObj.toISOString().slice(0, 10);
+}
+
+function loadTooltipPinDefault() {
+  try {
+    return window.localStorage.getItem(TOOLTIP_PIN_DEFAULT_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveTooltipPinDefault(enabled) {
+  try {
+    window.localStorage.setItem(TOOLTIP_PIN_DEFAULT_KEY, enabled ? "1" : "0");
+  } catch {
+    // Ignore persistence errors (private mode / restricted storage)
+  }
 }
 
 function addDaysIso(isoDate, days) {
@@ -263,17 +282,20 @@ function bindHoverModal(target, getDetails) {
 
   target.classList.add("is-hoverable");
   target.addEventListener("mouseenter", (event) => {
-    if (hoverModalState.pinned && !isSameHoverTarget(hoverModalState.pinTarget, target)) {
+    const autoPin = Boolean(state.tooltipPinDefault);
+    const sameTarget = isSameHoverTarget(hoverModalState.pinTarget, target);
+    if (hoverModalState.pinned && !sameTarget && !autoPin) {
       return;
     }
     const details = getDetails();
     showHoverModal(event, details, {
-      pinned: hoverModalState.pinned && isSameHoverTarget(hoverModalState.pinTarget, target),
+      pinned: autoPin || (hoverModalState.pinned && sameTarget),
       target,
     });
   });
   target.addEventListener("mousemove", (event) => {
-    if (hoverModalState.pinned && !isSameHoverTarget(hoverModalState.pinTarget, target)) {
+    const autoPin = Boolean(state.tooltipPinDefault);
+    if (hoverModalState.pinned && !isSameHoverTarget(hoverModalState.pinTarget, target) && !autoPin) {
       return;
     }
     positionHoverModal(event);
@@ -1271,6 +1293,7 @@ function init() {
   const anchorInput = qs("anchor-date");
   const startInput = qs("start-date");
   const endInput = qs("end-date");
+  const tooltipPinInput = qs("tooltip-pin-default");
 
   const today = todayIso();
   state.mode = "day";
@@ -1278,12 +1301,14 @@ function init() {
   state.anchorDate = today;
   state.startDate = today;
   state.endDate = today;
+  state.tooltipPinDefault = loadTooltipPinDefault();
 
   modeSelect.value = state.mode;
   groupSelect.value = state.groupBy;
   anchorInput.value = today;
   startInput.value = today;
   endInput.value = today;
+  tooltipPinInput.checked = state.tooltipPinDefault;
   setModeUi(state.mode);
 
   modeSelect.addEventListener("change", () => {
@@ -1305,6 +1330,12 @@ function init() {
 
   endInput.addEventListener("change", () => {
     state.endDate = endInput.value || null;
+  });
+
+  tooltipPinInput.addEventListener("change", () => {
+    state.tooltipPinDefault = Boolean(tooltipPinInput.checked);
+    saveTooltipPinDefault(state.tooltipPinDefault);
+    hideHoverModal(true);
   });
 
   qs("refresh-btn").addEventListener("click", () => {
