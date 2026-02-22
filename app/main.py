@@ -241,6 +241,25 @@ def _sorted_payload(by_key: dict[str, int], total_seconds: int) -> list[dict[str
     return payload
 
 
+def _top_bucket_payload(by_key: dict[str, int], total_seconds: int) -> dict[str, object]:
+    if not by_key:
+        return {
+            "app": "",
+            "seconds": 0,
+            "human": _seconds_to_human(0),
+            "percentage": 0.0,
+        }
+
+    app_label, seconds = max(by_key.items(), key=lambda item: (item[1], item[0].casefold()))
+    percentage = (seconds / total_seconds * 100.0) if total_seconds > 0 else 0.0
+    return {
+        "app": app_label,
+        "seconds": seconds,
+        "human": _seconds_to_human(seconds),
+        "percentage": round(percentage, 1),
+    }
+
+
 def _build_overview(
     segments: list[Segment],
     range_start: int,
@@ -253,7 +272,15 @@ def _build_overview(
     by_app: dict[str, int] = {}
     by_category: dict[str, int] = {}
     by_hour = [0] * 24
+    by_hour_active = [0] * 24
+    by_hour_effective = [0] * 24
+    by_hour_passive = [0] * 24
+    by_hour_afk = [0] * 24
+    by_hour_sleep = [0] * 24
+    by_hour_top_map: list[dict[str, int]] = [dict() for _ in range(24)]
     by_day: dict[str, int] = {}
+    by_day_status: dict[str, dict[str, int]] = {}
+    by_day_top_map: dict[str, dict[str, int]] = {}
     total_seconds = 0
     active_seconds = 0
     effective_seconds = 0
@@ -308,19 +335,78 @@ def _build_overview(
             next_day = cur_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
             chunk_end = min(end_dt, next_hour, next_day)
             chunk_seconds = int((chunk_end - cur_dt).total_seconds())
-            by_hour[cur_dt.hour] += chunk_seconds
+            hour_idx = cur_dt.hour
             day_key = cur_dt.date().isoformat()
+
+            by_hour[hour_idx] += chunk_seconds
+            day_status = by_day_status.setdefault(
+                day_key,
+                {
+                    "active": 0,
+                    "effective": 0,
+                    "passive": 0,
+                    "afk": 0,
+                    "sleep": 0,
+                },
+            )
+
+            if is_sleep:
+                by_hour_sleep[hour_idx] += chunk_seconds
+                day_status["sleep"] += chunk_seconds
+            elif is_afk:
+                by_hour_afk[hour_idx] += chunk_seconds
+                day_status["afk"] += chunk_seconds
+            else:
+                by_hour_active[hour_idx] += chunk_seconds
+                day_status["active"] += chunk_seconds
+                if is_passive:
+                    by_hour_passive[hour_idx] += chunk_seconds
+                    day_status["passive"] += chunk_seconds
+                else:
+                    by_hour_effective[hour_idx] += chunk_seconds
+                    day_status["effective"] += chunk_seconds
+
+            top_label = "No identificado" if is_unattributed else (app_for_stats or "No identificado")
+            hour_top = by_hour_top_map[hour_idx]
+            hour_top[top_label] = hour_top.get(top_label, 0) + chunk_seconds
+
+            day_top = by_day_top_map.setdefault(day_key, {})
+            day_top[top_label] = day_top.get(top_label, 0) + chunk_seconds
+
             by_day[day_key] = by_day.get(day_key, 0) + chunk_seconds
             cur_dt = chunk_end
 
-    by_day_payload = [
-        {
-            "date": day,
-            "seconds": seconds,
-            "human": _seconds_to_human(seconds),
-        }
-        for day, seconds in sorted(by_day.items())
+    by_hour_top_app = [
+        _top_bucket_payload(by_hour_top_map[hour], by_hour[hour])
+        for hour in range(24)
     ]
+
+    by_day_payload: list[dict[str, object]] = []
+    for day in sorted(by_day.keys()):
+        seconds = by_day.get(day, 0)
+        status = by_day_status.get(day, {})
+        top_app = _top_bucket_payload(by_day_top_map.get(day, {}), seconds)
+        by_day_payload.append(
+            {
+                "date": day,
+                "seconds": seconds,
+                "human": _seconds_to_human(seconds),
+                "active_seconds": int(status.get("active", 0)),
+                "active_human": _seconds_to_human(int(status.get("active", 0))),
+                "effective_seconds": int(status.get("effective", 0)),
+                "effective_human": _seconds_to_human(int(status.get("effective", 0))),
+                "passive_seconds": int(status.get("passive", 0)),
+                "passive_human": _seconds_to_human(int(status.get("passive", 0))),
+                "afk_seconds": int(status.get("afk", 0)),
+                "afk_human": _seconds_to_human(int(status.get("afk", 0))),
+                "sleep_seconds": int(status.get("sleep", 0)),
+                "sleep_human": _seconds_to_human(int(status.get("sleep", 0))),
+                "top_app": top_app["app"],
+                "top_app_seconds": top_app["seconds"],
+                "top_app_human": top_app["human"],
+                "top_app_percentage": top_app["percentage"],
+            }
+        )
 
     top_payload = _sorted_payload(by_group, total_seconds)[:50]
 
@@ -348,6 +434,12 @@ def _build_overview(
         "by_app": _sorted_payload(by_app, total_seconds),
         "by_category": _sorted_payload(by_category, total_seconds),
         "by_hour_seconds": by_hour,
+        "by_hour_active_seconds": by_hour_active,
+        "by_hour_effective_seconds": by_hour_effective,
+        "by_hour_passive_seconds": by_hour_passive,
+        "by_hour_afk_seconds": by_hour_afk,
+        "by_hour_sleep_seconds": by_hour_sleep,
+        "by_hour_top_app": by_hour_top_app,
         "by_day": by_day_payload,
     }
 

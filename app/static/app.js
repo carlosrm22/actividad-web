@@ -10,6 +10,11 @@ const state = {
   lastOverview: null,
 };
 
+const hoverModalState = {
+  pinned: false,
+  pinTarget: null,
+};
+
 const CHART_COLORS = [
   "#0f766e",
   "#2563eb",
@@ -116,6 +121,233 @@ function formatLocal(ts) {
 
 function formatDayLabel(dayIso) {
   return parseIsoDateUtc(dayIso).toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
+}
+
+function clampNumber(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function formatPercent(part, total) {
+  if (total <= 0) {
+    return "0.0";
+  }
+  return ((part / total) * 100).toFixed(1);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function buildHoverModalHtml(details) {
+  const title = escapeHtml(details.title || "Detalle");
+  const subtitle = details.subtitle ? `<p class="hover-subtitle">${escapeHtml(details.subtitle)}</p>` : "";
+  const rows = Array.isArray(details.rows)
+    ? details.rows
+        .map(
+          (row) => `
+          <div class="hover-row">
+            <span>${escapeHtml(row.label || "")}</span>
+            <strong>${escapeHtml(row.value || "")}</strong>
+          </div>
+        `
+        )
+        .join("")
+    : "";
+  const footer = details.footer ? `<p class="hover-footer">${escapeHtml(details.footer)}</p>` : "";
+  return `
+    <h4>${title}</h4>
+    ${subtitle}
+    <div class="hover-rows">${rows}</div>
+    ${footer}
+  `;
+}
+
+function isSameHoverTarget(targetA, targetB) {
+  return Boolean(targetA && targetB && targetA === targetB);
+}
+
+function getHoverModal() {
+  const modal = document.getElementById("hover-modal");
+  if (!(modal instanceof HTMLElement)) {
+    return null;
+  }
+  return modal;
+}
+
+function positionHoverModal(event) {
+  const modal = getHoverModal();
+  if (!modal || modal.classList.contains("hidden")) {
+    return;
+  }
+
+  const offset = 14;
+  const margin = 10;
+  const fallbackX = Math.round(window.innerWidth * 0.6);
+  const fallbackY = Math.round(window.innerHeight * 0.3);
+  const baseX = Number(event?.clientX ?? fallbackX);
+  const baseY = Number(event?.clientY ?? fallbackY);
+  const rect = modal.getBoundingClientRect();
+
+  const x = clampNumber(baseX + offset, margin, window.innerWidth - rect.width - margin);
+  const y = clampNumber(baseY + offset, margin, window.innerHeight - rect.height - margin);
+
+  modal.style.left = `${x}px`;
+  modal.style.top = `${y}px`;
+}
+
+function showHoverModal(event, details, options = {}) {
+  const modal = getHoverModal();
+  if (!modal || !details) {
+    return;
+  }
+
+  const pinned = Boolean(options.pinned);
+  const fallbackFooter = pinned ? "Fijado: clic fuera o Esc para cerrar" : "Tip: clic para fijar este detalle";
+  const payload = {
+    ...details,
+    footer: details.footer || fallbackFooter,
+  };
+
+  hoverModalState.pinned = pinned;
+  hoverModalState.pinTarget = pinned ? options.target || null : null;
+
+  modal.classList.toggle("pinned", pinned);
+  modal.setAttribute("data-pinned", pinned ? "1" : "0");
+  modal.innerHTML = buildHoverModalHtml(payload);
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  positionHoverModal(event);
+}
+
+function clearPinnedHoverModal() {
+  hoverModalState.pinned = false;
+  hoverModalState.pinTarget = null;
+}
+
+function hideHoverModal(force = false) {
+  if (hoverModalState.pinned && !force) {
+    return;
+  }
+
+  if (force) {
+    clearPinnedHoverModal();
+  }
+
+  const modal = getHoverModal();
+  if (!modal) {
+    return;
+  }
+  modal.classList.remove("pinned");
+  modal.removeAttribute("data-pinned");
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+function getTopAppLabel(app, seconds, percentage) {
+  const appName = (app || "").trim();
+  if (!appName) {
+    return "Sin datos";
+  }
+  return `${appName} · ${formatDuration(seconds)} (${Number(percentage || 0).toFixed(1)}%)`;
+}
+
+function bindHoverModal(target, getDetails) {
+  if (!(target instanceof HTMLElement || target instanceof SVGElement) || typeof getDetails !== "function") {
+    return;
+  }
+
+  target.classList.add("is-hoverable");
+  target.addEventListener("mouseenter", (event) => {
+    if (hoverModalState.pinned && !isSameHoverTarget(hoverModalState.pinTarget, target)) {
+      return;
+    }
+    const details = getDetails();
+    showHoverModal(event, details, {
+      pinned: hoverModalState.pinned && isSameHoverTarget(hoverModalState.pinTarget, target),
+      target,
+    });
+  });
+  target.addEventListener("mousemove", (event) => {
+    if (hoverModalState.pinned && !isSameHoverTarget(hoverModalState.pinTarget, target)) {
+      return;
+    }
+    positionHoverModal(event);
+  });
+  target.addEventListener("mouseleave", () => {
+    hideHoverModal(false);
+  });
+
+  target.addEventListener("click", (event) => {
+    if (hoverModalState.pinned && isSameHoverTarget(hoverModalState.pinTarget, target)) {
+      hideHoverModal(true);
+      return;
+    }
+
+    const details = getDetails();
+    showHoverModal(event, details, { pinned: true, target });
+  });
+}
+
+function formatMetricDuration(value) {
+  return formatDuration(Math.max(0, Number(value) || 0));
+}
+
+function buildPeriodEntryDetails(entry) {
+  return [
+    { label: "Tiempo activo", value: formatMetricDuration(entry.seconds) },
+    { label: "App dominante", value: getTopAppLabel(entry.top_app, entry.top_app_seconds, entry.top_app_percentage) },
+    { label: "Efectivo", value: formatMetricDuration(entry.effective_seconds) },
+    { label: "Pasivo", value: formatMetricDuration(entry.passive_seconds) },
+    { label: "AFK", value: formatMetricDuration(entry.afk_seconds) },
+    { label: "Suspensión", value: formatMetricDuration(entry.sleep_seconds) },
+  ];
+}
+
+function buildTrendEntryDetails(entry, currentValue, average, peak, deltaText) {
+  return [
+    { label: "Tiempo activo", value: formatDuration(currentValue) },
+    { label: "App dominante", value: getTopAppLabel(entry.top_app, entry.top_app_seconds, entry.top_app_percentage) },
+    { label: "Efectivo", value: formatMetricDuration(entry.effective_seconds) },
+    { label: "AFK", value: formatMetricDuration(entry.afk_seconds) },
+    { label: "Vs promedio", value: `${formatPercent(currentValue, average || 1)}%` },
+    { label: "Vs pico", value: `${formatPercent(currentValue, peak)}%` },
+    { label: "Cambio previo", value: deltaText },
+  ];
+}
+
+function toDayEntryFromPayload(dayRow) {
+  return {
+    seconds: Number(dayRow.seconds || 0),
+    active_seconds: Number(dayRow.active_seconds || dayRow.seconds || 0),
+    effective_seconds: Number(dayRow.effective_seconds || 0),
+    passive_seconds: Number(dayRow.passive_seconds || 0),
+    afk_seconds: Number(dayRow.afk_seconds || 0),
+    sleep_seconds: Number(dayRow.sleep_seconds || 0),
+    top_app: dayRow.top_app || "",
+    top_app_seconds: Number(dayRow.top_app_seconds || 0),
+    top_app_percentage: Number(dayRow.top_app_percentage || 0),
+  };
+}
+
+function toHourEntryFromPayload(data, hourIndex) {
+  const total = Number((Array.isArray(data.by_hour_seconds) ? data.by_hour_seconds[hourIndex] : 0) || 0);
+  const top = Array.isArray(data.by_hour_top_app) ? data.by_hour_top_app[hourIndex] || {} : {};
+  return {
+    seconds: total,
+    active_seconds: Number((Array.isArray(data.by_hour_active_seconds) ? data.by_hour_active_seconds[hourIndex] : total) || 0),
+    effective_seconds: Number((Array.isArray(data.by_hour_effective_seconds) ? data.by_hour_effective_seconds[hourIndex] : 0) || 0),
+    passive_seconds: Number((Array.isArray(data.by_hour_passive_seconds) ? data.by_hour_passive_seconds[hourIndex] : 0) || 0),
+    afk_seconds: Number((Array.isArray(data.by_hour_afk_seconds) ? data.by_hour_afk_seconds[hourIndex] : 0) || 0),
+    sleep_seconds: Number((Array.isArray(data.by_hour_sleep_seconds) ? data.by_hour_sleep_seconds[hourIndex] : 0) || 0),
+    top_app: String(top.app || ""),
+    top_app_seconds: Number(top.seconds || 0),
+    top_app_percentage: Number(top.percentage || 0),
+  };
 }
 
 async function fetchJson(url, options = undefined) {
@@ -283,18 +515,45 @@ function renderDonut(topItems) {
   donut.style.background = `conic-gradient(${segments
     .map((s) => `${s.color} ${s.start}% ${s.end}%`)
     .join(", ")})`;
+  legend.innerHTML = "";
+  segments.forEach((s, idx) => {
+    const row = document.createElement("div");
+    row.className = "legend-row";
 
-  legend.innerHTML = segments
-    .map(
-      (s) => `
-      <div class="legend-row">
-        <span class="legend-dot" style="background:${s.color};"></span>
-        <span class="legend-label">${s.app}</span>
-        <span class="legend-meta">${formatDuration(s.seconds)} (${s.pct.toFixed(1)}%)</span>
-      </div>
-    `
-    )
-    .join("");
+    const dot = document.createElement("span");
+    dot.className = "legend-dot";
+    dot.style.background = s.color;
+
+    const label = document.createElement("span");
+    label.className = "legend-label";
+    label.textContent = s.app;
+
+    const meta = document.createElement("span");
+    meta.className = "legend-meta";
+    meta.textContent = `${formatDuration(s.seconds)} (${s.pct.toFixed(1)}%)`;
+
+    row.appendChild(dot);
+    row.appendChild(label);
+    row.appendChild(meta);
+
+    bindHoverModal(row, () => ({
+      title: s.app,
+      subtitle: s.app === "Otros" ? "Suma de aplicaciones fuera del top visible." : `Posición #${idx + 1}`,
+      rows: [
+        { label: "Tiempo", value: formatDuration(s.seconds) },
+        { label: "Participación", value: `${s.pct.toFixed(1)}%` },
+        { label: "Total periodo", value: formatDuration(effectiveTotal) },
+        {
+          label: "Promedio diario",
+          value: formatDuration(
+            Math.round(effectiveTotal / Math.max(1, Number(state.lastOverview?.days_count) || 1))
+          ),
+        },
+      ],
+    }));
+
+    legend.appendChild(row);
+  });
 }
 
 function renderRanking(topItems) {
@@ -325,28 +584,41 @@ function renderPeriodChart(data) {
 
   let labels = [];
   let values = [];
+  let entries = [];
 
   if (state.mode === "day") {
     title.textContent = "Actividad por hora";
     labels = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, "0")}:00`);
-    values = Array.isArray(data.by_hour_seconds) ? data.by_hour_seconds : [];
+    values = labels.map((_, hourIndex) => Number((Array.isArray(data.by_hour_seconds) ? data.by_hour_seconds[hourIndex] : 0) || 0));
+    entries = labels.map((label, hourIndex) => ({
+      label,
+      iso_label: label,
+      ...toHourEntryFromPayload(data, hourIndex),
+    }));
   } else {
     title.textContent = "Actividad por día";
     const byDay = Array.isArray(data.by_day) ? data.by_day : [];
-    labels = byDay.map((x) => formatDayLabel(x.date));
-    values = byDay.map((x) => Number(x.seconds || 0));
+    labels = byDay.map((row) => formatDayLabel(row.date));
+    values = byDay.map((row) => Number(row.seconds || 0));
+    entries = byDay.map((row, idx) => ({
+      label: labels[idx] || "",
+      iso_label: row.date || "",
+      ...toDayEntryFromPayload(row),
+    }));
   }
 
   if (!labels.length || !values.length) {
     root.innerHTML = '<p class="empty">Sin datos para graficar.</p>';
-    return { labels: [], values: [] };
+    return { labels: [], values: [], entries: [] };
   }
 
   const peak = Math.max(...values, 1);
+  const total = values.reduce((acc, x) => acc + (Number(x) || 0), 0);
+  const avg = values.length > 0 ? total / values.length : 0;
   root.innerHTML = "";
 
   for (let i = 0; i < labels.length; i += 1) {
-    const value = values[i] || 0;
+    const value = entries[i]?.seconds || values[i] || 0;
     const pct = Math.round((value / peak) * 100);
     const row = document.createElement("div");
     row.className = "hour-row";
@@ -355,13 +627,36 @@ function renderPeriodChart(data) {
       <div class="bar"><span style="width: ${pct}%;"></span></div>
       <span class="hour-value">${formatDuration(value)}</span>
     `;
+    const entry = entries[i] || {
+      label: labels[i],
+      iso_label: labels[i],
+      seconds: value,
+      effective_seconds: 0,
+      passive_seconds: 0,
+      afk_seconds: 0,
+      sleep_seconds: 0,
+      top_app: "",
+      top_app_seconds: 0,
+      top_app_percentage: 0,
+    };
+
+    bindHoverModal(row, () => ({
+      title: state.mode === "day" ? `Hora ${labels[i]}` : `Día ${labels[i]}`,
+      subtitle: state.mode === "day" ? "Distribución intradía" : `Fecha ${entry.iso_label || labels[i]}`,
+      rows: [
+        ...buildPeriodEntryDetails(entry),
+        { label: "Peso en período", value: `${formatPercent(value, total)}%` },
+        { label: "Vs pico", value: `${formatPercent(value, peak)}%` },
+        { label: "Promedio", value: formatDuration(Math.round(avg)) },
+      ],
+    }));
     root.appendChild(row);
   }
 
-  return { labels, values };
+  return { labels, values, entries };
 }
 
-function renderTrendChart(labels, values) {
+function renderTrendChart(labels, values, entries = []) {
   const root = qs("trend-chart");
   if (!Array.isArray(values) || values.length === 0) {
     root.innerHTML = '<p class="empty">Sin tendencia para mostrar.</p>';
@@ -377,6 +672,8 @@ function renderTrendChart(labels, values) {
   const chartWidth = chartRight - chartLeft;
   const chartHeight = chartBottom - chartTop;
   const max = Math.max(...values, 1);
+  const total = values.reduce((acc, x) => acc + (Number(x) || 0), 0);
+  const avg = values.length > 0 ? total / values.length : 0;
 
   const points = values.map((value, idx) => {
     const x = values.length === 1 ? chartLeft + chartWidth / 2 : chartLeft + (idx / (values.length - 1)) * chartWidth;
@@ -394,7 +691,12 @@ function renderTrendChart(labels, values) {
     })
     .join("");
 
-  const dots = points.map((point) => `<circle class="trend-dot" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="2.5"></circle>`).join("");
+  const dots = points
+    .map(
+      (point, idx) =>
+        `<circle class="trend-dot trend-dot-hover" data-index="${idx}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="3.2"></circle>`
+    )
+    .join("");
 
   const tickIndexes = Array.from(new Set([0, Math.floor((labels.length - 1) / 2), labels.length - 1])).filter(
     (idx) => idx >= 0 && idx < labels.length
@@ -423,9 +725,41 @@ function renderTrendChart(labels, values) {
       ${ticks}
     </svg>
   `;
+
+  const dotElements = Array.from(root.querySelectorAll(".trend-dot-hover"));
+  dotElements.forEach((dot) => {
+    const index = Number(dot.getAttribute("data-index") || "-1");
+    if (index < 0 || index >= values.length) {
+      return;
+    }
+
+    bindHoverModal(dot, () => {
+      const current = values[index] || 0;
+      const prev = index > 0 ? values[index - 1] || 0 : null;
+      const delta = prev === null ? null : current - prev;
+      const deltaText =
+        delta === null
+          ? "N/A"
+          : `${delta >= 0 ? "+" : ""}${formatDuration(Math.abs(delta))} (${delta >= 0 ? "sube" : "baja"})`;
+      const entry = entries[index] || {
+        seconds: current,
+        effective_seconds: 0,
+        afk_seconds: 0,
+        top_app: "",
+        top_app_seconds: 0,
+        top_app_percentage: 0,
+      };
+
+      return {
+        title: `Tendencia ${labels[index] || `#${index + 1}`}`,
+        subtitle: state.mode === "day" ? "Punto por hora" : "Punto por día",
+        rows: buildTrendEntryDetails(entry, current, avg, max, deltaText),
+      };
+    });
+  });
 }
 
-function renderMiniSeries(containerId, labels, values) {
+function renderMiniSeries(containerId, labels, values, details = []) {
   const root = qs(containerId);
   if (!Array.isArray(values) || values.length === 0) {
     root.innerHTML = '<p class="empty">Sin datos.</p>';
@@ -433,11 +767,23 @@ function renderMiniSeries(containerId, labels, values) {
   }
 
   const peak = Math.max(...values, 1);
+  const total = values.reduce((acc, x) => acc + (Number(x) || 0), 0);
+  const avg = values.length > 0 ? total / values.length : 0;
   root.innerHTML = "";
 
   for (let i = 0; i < values.length; i += 1) {
     const value = values[i] || 0;
     const pct = Math.round((value / peak) * 100);
+    const entry = details[i] || {
+      seconds: value,
+      effective_seconds: 0,
+      passive_seconds: 0,
+      afk_seconds: 0,
+      sleep_seconds: 0,
+      top_app: "",
+      top_app_seconds: 0,
+      top_app_percentage: 0,
+    };
     const row = document.createElement("div");
     row.className = "hour-row";
     row.innerHTML = `
@@ -445,6 +791,16 @@ function renderMiniSeries(containerId, labels, values) {
       <div class="bar"><span style="width: ${pct}%;"></span></div>
       <span class="hour-value">${formatDuration(value)}</span>
     `;
+    bindHoverModal(row, () => ({
+      title: `Día ${labels[i]}`,
+      subtitle: "Serie de los últimos 30 días",
+      rows: [
+        ...buildPeriodEntryDetails(entry),
+        { label: "Peso en 30 días", value: `${formatPercent(value, total)}%` },
+        { label: "Vs promedio", value: `${formatPercent(value, avg || 1)}%` },
+        { label: "Vs pico", value: `${formatPercent(value, peak)}%` },
+      ],
+    }));
     root.appendChild(row);
   }
 }
@@ -812,12 +1168,17 @@ async function loadRolling30() {
   const byDay = Array.isArray(data.by_day) ? data.by_day : [];
   const labels = byDay.map((row) => formatDayLabel(row.date));
   const values = byDay.map((row) => Number(row.seconds || 0));
+  const details = byDay.map((row) => ({
+    label: formatDayLabel(row.date),
+    iso_label: row.date || "",
+    ...toDayEntryFromPayload(row),
+  }));
 
   qs("rolling30-summary").textContent = `Del ${formatShortDate(start)} al ${formatShortDate(end)} · Activo ${
     data.active_human || data.total_human
   } · AFK ${data.afk_human || "0s"}`;
 
-  renderMiniSeries("rolling30-chart", labels, values);
+  renderMiniSeries("rolling30-chart", labels, values, details);
 }
 
 async function loadHealth() {
@@ -855,7 +1216,7 @@ async function loadOverview() {
   renderRanking(data.top_apps || []);
 
   const period = renderPeriodChart(data);
-  renderTrendChart(period.labels, period.values);
+  renderTrendChart(period.labels, period.values, period.entries || []);
 
   const previousRange = buildPreviousRange(data);
   if (!previousRange) {
@@ -1028,6 +1389,32 @@ function init() {
       qs("backup-status").textContent = `Error restaurando backup: ${String(err.message || err)}`;
     });
   });
+
+  document.addEventListener("click", (event) => {
+    if (!hoverModalState.pinned) {
+      return;
+    }
+
+    const pinnedTarget = hoverModalState.pinTarget;
+    const eventPath = typeof event.composedPath === "function" ? event.composedPath() : [];
+    if (
+      pinnedTarget &&
+      (eventPath.includes(pinnedTarget) ||
+        (pinnedTarget instanceof Element && pinnedTarget.contains(event.target)))
+    ) {
+      return;
+    }
+    hideHoverModal(true);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      hideHoverModal(true);
+    }
+  });
+
+  window.addEventListener("scroll", () => hideHoverModal(true), true);
+  window.addEventListener("resize", () => hideHoverModal(true));
 
   refreshAll();
   setInterval(refreshAll, 15000);

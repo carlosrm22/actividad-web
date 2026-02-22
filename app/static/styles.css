@@ -332,6 +332,13 @@ h2 {
   grid-template-columns: auto 1fr auto;
   gap: 8px;
   align-items: center;
+  padding: 4px 6px;
+  border-radius: 10px;
+  transition: background 140ms ease;
+}
+
+.legend-row.is-hoverable:hover {
+  background: rgba(15, 118, 110, 0.08);
 }
 
 .legend-dot {
@@ -360,6 +367,13 @@ h2 {
   grid-template-columns: 52px 1fr 70px;
   gap: 9px;
   align-items: center;
+  padding: 3px 4px;
+  border-radius: 8px;
+  transition: background 140ms ease;
+}
+
+.hour-row.is-hoverable:hover {
+  background: rgba(37, 99, 235, 0.06);
 }
 
 .hour-label,
@@ -413,6 +427,20 @@ h2 {
 
 .trend-dot {
   fill: #0f766e;
+}
+
+.trend-dot-hover {
+  cursor: pointer;
+  stroke: rgba(255, 255, 255, 0.8);
+  stroke-width: 0.8;
+  transition: fill 120ms ease, transform 120ms ease;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.trend-dot-hover:hover {
+  fill: #0b5f58;
+  transform: scale(1.2);
 }
 
 .trend-x-label {
@@ -550,6 +578,72 @@ th {
   color: var(--muted);
 }
 
+.is-hoverable {
+  cursor: pointer;
+}
+
+.hover-modal {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 1200;
+  width: min(340px, calc(100vw - 24px));
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(20, 28, 24, 0.96);
+  color: #f0fff7;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.34);
+  pointer-events: none;
+}
+
+.hover-modal.pinned {
+  border-color: rgba(45, 212, 191, 0.85);
+  box-shadow: 0 14px 36px rgba(6, 78, 59, 0.45);
+}
+
+.hover-modal h4 {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
+
+.hover-subtitle {
+  margin: 2px 0 8px;
+  font-size: 11px;
+  color: #b9d4c4;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.hover-rows {
+  display: grid;
+  gap: 5px;
+}
+
+.hover-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.hover-row span {
+  color: #d4e9dc;
+}
+
+.hover-row strong {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: #ffffff;
+}
+
+.hover-footer {
+  margin: 8px 0 0;
+  font-size: 10px;
+  color: #98bea8;
+}
+
 @media (max-width: 1100px) {
   .compare-grid-5 {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -600,5 +694,9 @@ th {
     display: grid;
     justify-items: start;
     grid-template-columns: 1fr;
+  }
+
+  .hover-modal {
+    width: min(290px, calc(100vw - 18px));
   }
 }

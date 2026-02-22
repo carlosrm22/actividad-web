@@ -34,6 +34,22 @@ def test_overview_and_export_endpoints(client_app, today_iso):
     assert overview_payload["passive_seconds"] >= 0
     assert overview_payload["afk_seconds"] > 0
     assert overview_payload["sleep_seconds"] > 0
+    assert len(overview_payload["by_hour_seconds"]) == 24
+    assert len(overview_payload["by_hour_top_app"]) == 24
+    assert len(overview_payload["by_hour_active_seconds"]) == 24
+    assert len(overview_payload["by_hour_effective_seconds"]) == 24
+    assert len(overview_payload["by_hour_passive_seconds"]) == 24
+    assert len(overview_payload["by_hour_afk_seconds"]) == 24
+    assert len(overview_payload["by_hour_sleep_seconds"]) == 24
+
+    if overview_payload["by_day"]:
+        first_day = overview_payload["by_day"][0]
+        assert "top_app" in first_day
+        assert "top_app_seconds" in first_day
+        assert "effective_seconds" in first_day
+        assert "passive_seconds" in first_day
+        assert "afk_seconds" in first_day
+        assert "sleep_seconds" in first_day
 
     export_json = client.get(
         "/api/export/sessions",
